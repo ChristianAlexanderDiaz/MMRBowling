@@ -627,33 +627,32 @@ def _format_bonus_details(bonus_details: List[str]) -> str:
         return ""
 
     from collections import Counter
+    import re
 
     bonuses = []
     total_bonus = 0
 
     for detail in bonus_details:
         # Parse format: "YYY+ Game: +NN MMR" or "Perfect Game (300): +NN MMR"
+        # Extract the bonus amount: everything after the last +, before " MMR"
+        amount_match = re.search(r'\+(\d+)\s+MMR', detail)
+        amount = int(amount_match.group(1)) if amount_match else 0
+
         if "Perfect Game" in detail:
             bonuses.append("🎳")
-            # Extract the bonus amount
-            amount_str = detail.split("+")[1].split()[0]
-            total_bonus += int(amount_str)
+            total_bonus += amount
         elif "275+" in detail:
             bonuses.append("275+")
-            amount_str = detail.split("+")[1].split()[0]
-            total_bonus += int(amount_str)
+            total_bonus += amount
         elif "250+" in detail:
             bonuses.append("250+")
-            amount_str = detail.split("+")[1].split()[0]
-            total_bonus += int(amount_str)
+            total_bonus += amount
         elif "225+" in detail:
             bonuses.append("225+")
-            amount_str = detail.split("+")[1].split()[0]
-            total_bonus += int(amount_str)
+            total_bonus += amount
         elif "200+" in detail:
             bonuses.append("200+")
-            amount_str = detail.split("+")[1].split()[0]
-            total_bonus += int(amount_str)
+            total_bonus += amount
 
     if not bonuses:
         return ""
