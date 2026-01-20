@@ -5,7 +5,7 @@ import logging
 from datetime import datetime, date
 from sqlalchemy.exc import IntegrityError
 from database.connection import SessionLocal
-from database.models import Season, Player, PlayerSeasonStats, Config, RankTier, Session, SessionCheckIn, Score
+from database.models import Season, Player, PlayerSeasonStats, Config, RankTier, Session, SessionCheckIn, Score, BonusConfig
 
 logger = logging.getLogger('MMRBowling.Admin')
 
@@ -817,6 +817,154 @@ class AdminCog(commands.Cog):
             logger.error(f"Error clearing sessions: {e}")
             await interaction.followup.send(
                 f"Error clearing sessions: {str(e)}",
+                ephemeral=True
+            )
+        finally:
+            db.close()
+
+    @app_commands.command(name="seed", description="Seed database with initial rank tiers, config, and bonuses")
+    @app_commands.describe(
+        season_name="Season name (e.g., 'Season 1')",
+        start_date="Start date in YYYY-MM-DD format (optional, defaults to today)",
+        end_date="End date in YYYY-MM-DD format (optional, can be null)"
+    )
+    @app_commands.default_permissions(administrator=True)
+    async def seed_database(
+        self,
+        interaction: discord.Interaction,
+        season_name: str = "Season 1",
+        start_date: str = None,
+        end_date: str = None
+    ):
+        """Seed rank tiers, config, and bonuses. Add players separately with /registerplayer."""
+        await interaction.response.defer(ephemeral=True)
+
+        db = SessionLocal()
+        try:
+            # Parse dates
+            if start_date:
+                try:
+                    parsed_start_date = datetime.strptime(start_date, '%Y-%m-%d').date()
+                except ValueError:
+                    await interaction.followup.send(
+                        "Invalid start_date format. Please use YYYY-MM-DD.",
+                        ephemeral=True
+                    )
+                    return
+            else:
+                parsed_start_date = date.today()
+
+            if end_date:
+                try:
+                    parsed_end_date = datetime.strptime(end_date, '%Y-%m-%d').date()
+                except ValueError:
+                    await interaction.followup.send(
+                        "Invalid end_date format. Please use YYYY-MM-DD.",
+                        ephemeral=True
+                    )
+                    return
+            else:
+                parsed_end_date = None
+
+            # === SEED RANK TIERS ===
+            rank_tiers = [
+                {"rank_name": "Bronze", "mmr_threshold": 6600, "color": "#CD7F32", "order": 14},
+                {"rank_name": "Bronze II", "mmr_threshold": 6800, "color": "#CD7F32", "order": 13},
+                {"rank_name": "Bronze III", "mmr_threshold": 7000, "color": "#CD7F32", "order": 12},
+                {"rank_name": "Silver", "mmr_threshold": 7200, "color": "#C0C0C0", "order": 11},
+                {"rank_name": "Silver II", "mmr_threshold": 7400, "color": "#C0C0C0", "order": 10},
+                {"rank_name": "Silver III", "mmr_threshold": 7600, "color": "#C0C0C0", "order": 9},
+                {"rank_name": "Gold", "mmr_threshold": 7800, "color": "#FFD700", "order": 8},
+                {"rank_name": "Gold II", "mmr_threshold": 8100, "color": "#FFD700", "order": 7},
+                {"rank_name": "Platinum", "mmr_threshold": 8400, "color": "#4794FF", "order": 6},
+                {"rank_name": "Platinum II", "mmr_threshold": 8700, "color": "#4794FF", "order": 5},
+                {"rank_name": "Emerald", "mmr_threshold": 9000, "color": "#50C878", "order": 4},
+                {"rank_name": "Ruby", "mmr_threshold": 9300, "color": "#E0115F", "order": 3},
+                {"rank_name": "Diamond", "mmr_threshold": 9600, "color": "#B9F2FF", "order": 2},
+                {"rank_name": "Master", "mmr_threshold": 10000, "color": "#000000", "order": 1},
+                {"rank_name": "Grandmaster", "mmr_threshold": 11000, "color": "#7F0CA2", "order": 0},
+            ]
+
+            tier_count = 0
+            for tier_data in rank_tiers:
+                existing = db.query(RankTier).filter(RankTier.mmr_threshold == tier_data["mmr_threshold"]).first()
+                if not existing:
+                    tier = RankTier(**tier_data)
+                    db.add(tier)
+                    tier_count += 1
+
+            db.commit()
+
+            # === SEED CONFIG ===
+            configs = [
+                {"key": "k_factor", "value": "100", "value_type": "int", "description": "K-factor for Elo calculations"},
+                {"key": "decay_amount", "value": "50", "value_type": "int", "description": "MMR decay per miss after threshold"},
+                {"key": "decay_threshold", "value": "4", "value_type": "int", "description": "Unexcused misses before decay starts"},
+                {"key": "session_activation_threshold", "value": "3", "value_type": "int", "description": "Number of Game 1 submissions needed to activate session"},
+            ]
+
+            config_count = 0
+            for config_data in configs:
+                existing = db.query(Config).filter(Config.key == config_data["key"]).first()
+                if not existing:
+                    config = Config(**config_data)
+                    db.add(config)
+                    config_count += 1
+
+            db.commit()
+
+            # === SEED BONUS CONFIG ===
+            bonuses = [
+                {"bonus_name": "200 Club", "bonus_amount": 5.0, "condition_type": "score_threshold", "condition_value": {"threshold": 200}, "description": "Score 200+ in a game", "is_active": True},
+                {"bonus_name": "225 Club", "bonus_amount": 8.0, "condition_type": "score_threshold", "condition_value": {"threshold": 225}, "description": "Score 225+ in a game", "is_active": True},
+                {"bonus_name": "250 Club", "bonus_amount": 12.0, "condition_type": "score_threshold", "condition_value": {"threshold": 250}, "description": "Score 250+ in a game", "is_active": True},
+                {"bonus_name": "275 Club", "bonus_amount": 18.0, "condition_type": "score_threshold", "condition_value": {"threshold": 275}, "description": "Score 275+ in a game", "is_active": True},
+                {"bonus_name": "Perfect Game", "bonus_amount": 50.0, "condition_type": "score_threshold", "condition_value": {"threshold": 300}, "description": "Perfect 300 game", "is_active": True},
+            ]
+
+            bonus_count = 0
+            for bonus_data in bonuses:
+                existing = db.query(BonusConfig).filter(BonusConfig.bonus_name == bonus_data["bonus_name"]).first()
+                if not existing:
+                    bonus = BonusConfig(**bonus_data)
+                    db.add(bonus)
+                    bonus_count += 1
+
+            db.commit()
+
+            # === CREATE SEASON ===
+            season_msg = ""
+            existing_season = db.query(Season).filter(Season.is_active == True).first()
+            if not existing_season:
+                new_season = Season(
+                    name=season_name,
+                    start_date=parsed_start_date,
+                    end_date=parsed_end_date,
+                    is_active=True,
+                    promotion_week=0
+                )
+                db.add(new_season)
+                db.commit()
+                season_msg = "\n✅ Created season: " + season_name + " (Start: " + str(parsed_start_date) + ")"
+            else:
+                season_msg = "\n⏭️  Season already exists: " + existing_season.name
+
+            response_msg = ("**✅ Database Seeded!**"
+                          "\n✅ Added " + str(tier_count) + " rank tiers"
+                          "\n✅ Added " + str(config_count) + " config values"
+                          "\n✅ Added " + str(bonus_count) + " bonus configs"
+                          + season_msg +
+                          "\n\nNext: Use `/registerplayer` to add players with custom starting MMR")
+
+            await interaction.followup.send(response_msg, ephemeral=True)
+
+            logger.info("Database seeded successfully")
+
+        except Exception as e:
+            db.rollback()
+            logger.error("Error seeding database: " + str(e))
+            await interaction.followup.send(
+                "Error seeding database: " + str(e),
                 ephemeral=True
             )
         finally:
