@@ -640,34 +640,41 @@ def _format_bonus_details(bonus_details: List[str]) -> str:
     total_bonus = 0
 
     for detail in bonus_details:
-        # Parse format: "YYY+ Game: +NN MMR" or "Perfect Game (300): +NN MMR"
-        # Extract the bonus amount: everything after the last +, before " MMR"
-        amount_match = re.search(r'\+(\d+)\s+MMR', detail)
-        amount = int(amount_match.group(1)) if amount_match else 0
+        try:
+            amount_match = re.search(r'\+(\d+)\s+MMR', detail)
+            if not amount_match:
+                logger.warning(f"Could not parse bonus amount from: {detail}")
+                continue
 
-        if "Perfect Game" in detail:
-            bonuses.append("🎳")
-            total_bonus += amount
-        elif "275+" in detail:
-            bonuses.append("275+")
-            total_bonus += amount
-        elif "250+" in detail:
-            bonuses.append("250+")
-            total_bonus += amount
-        elif "225+" in detail:
-            bonuses.append("225+")
-            total_bonus += amount
-        elif "200+" in detail:
-            bonuses.append("200+")
-            total_bonus += amount
+            amount = int(amount_match.group(1))
+
+            if "Perfect Game" in detail:
+                bonuses.append("🎳")
+                total_bonus += amount
+            elif "275+" in detail:
+                bonuses.append("275+")
+                total_bonus += amount
+            elif "250+" in detail:
+                bonuses.append("250+")
+                total_bonus += amount
+            elif "225+" in detail:
+                bonuses.append("225+")
+                total_bonus += amount
+            elif "200+" in detail:
+                bonuses.append("200+")
+                total_bonus += amount
+            else:
+                logger.warning(f"Unknown bonus type in: {detail}")
+
+        except (AttributeError, ValueError) as e:
+            logger.error(f"Error parsing bonus detail '{detail}': {e}")
+            continue
 
     if not bonuses:
         return ""
 
-    # Count occurrences
     bonus_counts = Counter(bonuses)
 
-    # Format with multipliers if repeated
     formatted_bonuses = []
     for bonus_type in ["200+", "225+", "250+", "275+", "🎳"]:
         if bonus_type in bonus_counts:

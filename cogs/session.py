@@ -31,8 +31,9 @@ class SessionCog(commands.Cog):
 
     def __init__(self, bot):
         self.bot = bot
+        self._config_cache = {}
+        self._cache_timestamp = {}
 
-        # Start the check-in task
         try:
             self.check_in_task.start()
             logger.info("Check-in task started successfully")
@@ -393,22 +394,24 @@ class SessionCog(commands.Cog):
             # Check for session activation (Nth Game 1 submission)
             activation_msg = ""
             if not session.is_active and game_number == 1:
-                game1_count = db.query(Score).filter(
-                    Score.session_id == session.id,
-                    Score.game_number == 1
-                ).count()
+                db.refresh(session)
 
-                # Get activation threshold from config (default 3)
-                activation_threshold = self._get_config_value(db, 'session_activation_threshold', 3, int)
+                if not session.is_active:
+                    game1_count = db.query(Score).filter(
+                        Score.session_id == session.id,
+                        Score.game_number == 1
+                    ).count()
 
-                if game1_count >= activation_threshold:
-                    session.is_active = True
-                    db.commit()
-                    logger.info(
-                        f"Session {session.id} activated! "
-                        f"({game1_count} Game 1 submissions, threshold: {activation_threshold})"
-                    )
-                    activation_msg = f"\n\nSession is now ACTIVE!"
+                    activation_threshold = self._get_config_value(db, 'session_activation_threshold', 3, int)
+
+                    if game1_count >= activation_threshold:
+                        session.is_active = True
+                        db.commit()
+                        logger.info(
+                            f"Session {session.id} activated! "
+                            f"({game1_count} Game 1 submissions, threshold: {activation_threshold})"
+                        )
+                        activation_msg = f"\n\nSession is now ACTIVE!"
 
             # Update or create status embed
             await self._update_status_embed(session.id, db)
@@ -417,13 +420,15 @@ class SessionCog(commands.Cog):
             auto_reveal_msg = ""
             if session.is_active and game_number == 2:
                 if self._check_auto_reveal(session.id, db):
-                    logger.info(
-                        f"Session {session.id} ready for auto-reveal! "
-                        f"All players have submitted."
-                    )
-                    auto_reveal_msg = "\n\nAll players have submitted! Ready for reveal."
-                    # Notify admin of ready-to-reveal state
-                    await self._notify_auto_reveal_ready(session.id, db)
+                    if not session.auto_reveal_notified:
+                        logger.info(
+                            f"Session {session.id} ready for auto-reveal! "
+                            f"All players have submitted."
+                        )
+                        auto_reveal_msg = "\n\nAll players have submitted! Ready for reveal."
+                        await self._notify_auto_reveal_ready(session.id, db)
+                        session.auto_reveal_notified = True
+                        db.commit()
 
             remaining_msg = ""
             if game_number == 1:
@@ -492,6 +497,13 @@ class SessionCog(commands.Cog):
                 )
                 return
 
+            if session.is_revealed:
+                await interaction.followup.send(
+                    "Cannot edit scores after session has been revealed!",
+                    ephemeral=True
+                )
+                return
+
             # Get player
             player = db.query(Player).filter(
                 Player.discord_id == str(interaction.user.id)
@@ -519,7 +531,6 @@ class SessionCog(commands.Cog):
                 )
                 return
 
-            # Update the score
             old_score = score_entry.score
             score_entry.score = new_score
             db.commit()
@@ -814,58 +825,59 @@ class SessionCog(commands.Cog):
                 rank_tiers
             )
 
-            # Update database with results
-            for result in results:
-                player = db.query(Player).get(result.player_id)
-                if not player:
-                    continue
+            try:
+                # Update database with results atomically
+                for result in results:
+                    player = db.query(Player).get(result.player_id)
+                    if not player:
+                        continue
 
-                # Update player MMR
-                old_mmr = player.current_mmr
-                player.current_mmr = result.new_mmr
+                    old_mmr = player.current_mmr
+                    player.current_mmr = result.new_mmr
 
-                # Update scores with MMR changes
-                scores = db.query(Score).filter(
-                    Score.player_id == result.player_id,
-                    Score.session_id == session.id
-                ).all()
+                    scores = db.query(Score).filter(
+                        Score.player_id == result.player_id,
+                        Score.session_id == session.id
+                    ).all()
 
-                for score in scores:
-                    score.mmr_before = old_mmr
-                    score.mmr_after = result.new_mmr
-                    score.mmr_change = result.mmr_change
-                    score.bonus_applied = result.bonus_mmr
+                    for score in scores:
+                        score.mmr_before = old_mmr
+                        score.mmr_after = result.new_mmr
+                        score.mmr_change = result.mmr_change
+                        score.bonus_applied = result.bonus_mmr
 
-                # Update player season stats
-                game1 = next((s.score for s in scores if s.game_number == 1), 0)
-                game2 = next((s.score for s in scores if s.game_number == 2), 0)
-                self._update_season_stats(
-                    player.id,
-                    session.season_id,
-                    game1,
-                    game2,
-                    result.new_mmr,
-                    db
-                )
+                    game1 = next((s.score for s in scores if s.game_number == 1), 0)
+                    game2 = next((s.score for s in scores if s.game_number == 2), 0)
+                    self._update_season_stats(
+                        player.id,
+                        session.season_id,
+                        game1,
+                        game2,
+                        result.new_mmr,
+                        db
+                    )
 
-                # Update rank tier if changed
-                if result.rank_changed:
-                    new_tier = db.query(RankTier).filter(
-                        RankTier.rank_name == result.new_rank.name
-                    ).first()
-                    if new_tier:
-                        player.rank_tier_id = new_tier.id
+                    if result.rank_changed:
+                        new_tier = db.query(RankTier).filter(
+                            RankTier.rank_name == result.new_rank.name
+                        ).first()
+                        if new_tier:
+                            player.rank_tier_id = new_tier.id
 
-                logger.info(
-                    f"Updated {player.username}: "
-                    f"{old_mmr:.1f} -> {result.new_mmr:.1f} "
-                    f"({result.mmr_change:+.1f})"
-                )
+                    logger.info(
+                        f"Updated {player.username}: "
+                        f"{old_mmr:.1f} -> {result.new_mmr:.1f} "
+                        f"({result.mmr_change:+.1f})"
+                    )
 
-            # Mark session as revealed
-            session.is_revealed = True
-            session.revealed_at = datetime.now()
-            db.commit()
+                session.is_revealed = True
+                session.revealed_at = datetime.now()
+                db.commit()
+
+            except Exception as e:
+                db.rollback()
+                logger.error(f"Error updating MMR results, rolled back: {e}")
+                raise
 
             logger.info(f"Session {session.id} revealed successfully")
 
@@ -1277,21 +1289,54 @@ class SessionCog(commands.Cog):
         return players_data
 
     def _get_config_value(self, db: DBSession, key: str, default: Any, value_type: type = None) -> Any:
-        """Get a configuration value from the database."""
+        """Get a configuration value from the database with caching."""
+        from datetime import datetime, timedelta
+
+        now = datetime.now()
+        cache_key = key
+
+        if cache_key in self._config_cache:
+            cached_time = self._cache_timestamp.get(cache_key)
+            if cached_time and (now - cached_time) < timedelta(minutes=5):
+                return self._config_cache[cache_key]
+
         config = db.query(Config).filter(Config.key == key).first()
-        if config:
-            return config.get_typed_value()
-        return default
+        value = config.get_typed_value() if config else default
+
+        self._config_cache[cache_key] = value
+        self._cache_timestamp[cache_key] = now
+
+        return value
 
     def _get_bonus_config(self, db: DBSession) -> BonusConfig:
         """Get bonus configuration from database."""
-        # Get bonus configs from database
         bonuses = db.query(DBBonusConfig).filter(DBBonusConfig.is_active == True).all()
 
         bonus_dict = {}
+        seen_thresholds = set()
+
         for bonus in bonuses:
             if bonus.condition_type == 'score_threshold':
-                threshold = bonus.condition_value.get('threshold', 0) if bonus.condition_value else 0
+                if not bonus.condition_value or not isinstance(bonus.condition_value, dict):
+                    logger.warning(f"Invalid bonus config: {bonus.bonus_name} has malformed condition_value")
+                    continue
+
+                if 'threshold' not in bonus.condition_value:
+                    logger.warning(f"Invalid bonus config: {bonus.bonus_name} missing 'threshold' key")
+                    continue
+
+                try:
+                    threshold = int(bonus.condition_value['threshold'])
+                except (ValueError, TypeError):
+                    logger.warning(f"Invalid bonus config: {bonus.bonus_name} has non-numeric threshold")
+                    continue
+
+                if threshold in seen_thresholds:
+                    logger.warning(f"Duplicate bonus threshold: {threshold} found multiple times")
+                    continue
+
+                seen_thresholds.add(threshold)
+
                 if threshold == 200:
                     bonus_dict['game_200'] = int(bonus.bonus_amount)
                 elif threshold == 225:
@@ -1518,24 +1563,23 @@ class SessionCog(commands.Cog):
             # Create embed
             embed = create_status_embed(session_data, session.is_active)
 
-            # Post or update
             if session.status_message_id:
-                # Update existing
+                if session.status_message_id == "DELETED":
+                    return
+
                 try:
                     message = await channel.fetch_message(int(session.status_message_id))
                     await message.edit(embed=embed)
                     logger.debug(f"Updated status embed for session {session_id}")
                 except discord.NotFound:
-                    # Message deleted, post new one
-                    message = await channel.send(embed=embed)
-                    session.status_message_id = str(message.id)
+                    session.status_message_id = "DELETED"
                     db.commit()
-                    logger.info(f"Posted new status embed (old deleted) for session {session_id}")
+                    logger.info(f"Status message deleted, marked as DELETED for session {session_id}")
+                    return
                 except discord.Forbidden:
                     logger.error(f"Missing permissions to update status embed {session.status_message_id}")
                     return
             else:
-                # Post new
                 try:
                     message = await channel.send(embed=embed)
                     session.status_message_id = str(message.id)
