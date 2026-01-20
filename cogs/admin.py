@@ -1,0 +1,828 @@
+import discord
+from discord import app_commands
+from discord.ext import commands
+import logging
+from datetime import datetime, date
+from sqlalchemy.exc import IntegrityError
+from database.connection import SessionLocal
+from database.models import Season, Player, PlayerSeasonStats, Config, RankTier, Session, SessionCheckIn, Score
+
+logger = logging.getLogger('MMRBowling.Admin')
+
+
+class AdminCog(commands.Cog):
+    """
+    Administrative commands for managing seasons, configuration, and bot settings.
+    """
+
+    def __init__(self, bot):
+        self.bot = bot
+
+    @app_commands.command(name="newseason", description="Start a new bowling season")
+    @app_commands.describe(
+        name="Season name (e.g., 'Spring 2025')",
+        start_date="Start date in YYYY-MM-DD format (optional, defaults to today)",
+        end_date="End date in YYYY-MM-DD format (optional, can be null)"
+    )
+    @app_commands.default_permissions(administrator=True)
+    async def new_season(
+        self,
+        interaction: discord.Interaction,
+        name: str,
+        start_date: str = None,
+        end_date: str = None
+    ):
+        """Start a new bowling season."""
+        await interaction.response.defer(ephemeral=True)
+
+        db = SessionLocal()
+        try:
+            # Parse dates
+            if start_date:
+                try:
+                    parsed_start_date = datetime.strptime(start_date, '%Y-%m-%d').date()
+                except ValueError:
+                    await interaction.followup.send(
+                        "Invalid start_date format. Please use YYYY-MM-DD.",
+                        ephemeral=True
+                    )
+                    return
+            else:
+                parsed_start_date = date.today()
+
+            if end_date:
+                try:
+                    parsed_end_date = datetime.strptime(end_date, '%Y-%m-%d').date()
+                except ValueError:
+                    await interaction.followup.send(
+                        "Invalid end_date format. Please use YYYY-MM-DD.",
+                        ephemeral=True
+                    )
+                    return
+            else:
+                parsed_end_date = None
+
+            # Deactivate all existing seasons
+            db.query(Season).update({"is_active": False})
+
+            # Create new season
+            new_season = Season(
+                name=name,
+                start_date=parsed_start_date,
+                end_date=parsed_end_date,
+                is_active=True,
+                promotion_week=0
+            )
+            db.add(new_season)
+            db.commit()
+            db.refresh(new_season)
+
+            logger.info(f"Created new season: {name} (ID: {new_season.id})")
+
+            await interaction.followup.send(
+                f"**Season Created Successfully!**\n"
+                f"Name: `{name}`\n"
+                f"Season ID: `{new_season.id}`\n"
+                f"Start Date: `{parsed_start_date}`\n"
+                f"End Date: `{parsed_end_date or 'Not set'}`\n"
+                f"Status: Active",
+                ephemeral=True
+            )
+
+        except IntegrityError as e:
+            db.rollback()
+            logger.error(f"Failed to create season {name}: {e}")
+            await interaction.followup.send(
+                f"Error: A season with the name '{name}' already exists.",
+                ephemeral=True
+            )
+        except Exception as e:
+            db.rollback()
+            logger.error(f"Error creating season: {e}")
+            await interaction.followup.send(
+                f"An error occurred while creating the season: {str(e)}",
+                ephemeral=True
+            )
+        finally:
+            db.close()
+
+    @app_commands.command(name="setk", description="Set the K-factor for MMR calculations")
+    @app_commands.describe(k_value="K-factor value (e.g., 50)")
+    @app_commands.default_permissions(administrator=True)
+    async def set_k_factor(self, interaction: discord.Interaction, k_value: int):
+        """Set the K-factor for Elo calculations."""
+        await interaction.response.defer(ephemeral=True)
+
+        if k_value <= 0:
+            await interaction.followup.send(
+                "K-factor must be a positive integer.",
+                ephemeral=True
+            )
+            return
+
+        db = SessionLocal()
+        try:
+            # Check if k_factor config exists
+            config = db.query(Config).filter(Config.key == "k_factor").first()
+
+            if config:
+                # Update existing
+                config.value = str(k_value)
+                config.updated_at = datetime.now()
+            else:
+                # Create new
+                config = Config(
+                    key="k_factor",
+                    value=str(k_value),
+                    value_type="int",
+                    description="K-factor for Elo calculations"
+                )
+                db.add(config)
+
+            db.commit()
+            logger.info(f"K-factor set to {k_value}")
+
+            await interaction.followup.send(
+                f"**K-factor Updated!**\n"
+                f"New K-factor: `{k_value}`\n"
+                f"This will be used for all future MMR calculations.",
+                ephemeral=True
+            )
+
+        except Exception as e:
+            db.rollback()
+            logger.error(f"Error setting K-factor: {e}")
+            await interaction.followup.send(
+                f"An error occurred while setting the K-factor: {str(e)}",
+                ephemeral=True
+            )
+        finally:
+            db.close()
+
+    @app_commands.command(name="registerplayer", description="Register a new player for the current season")
+    @app_commands.describe(
+        discord_user="Discord member to register",
+        starting_mmr="Initial MMR (default: 8000)",
+        division="Division 1 or 2 (default: 1)"
+    )
+    @app_commands.default_permissions(administrator=True)
+    async def register_player(
+        self,
+        interaction: discord.Interaction,
+        discord_user: discord.Member,
+        starting_mmr: int = 8000,
+        division: int = 1
+    ):
+        """Register a new player for the current active season."""
+        await interaction.response.defer(ephemeral=True)
+
+        if division not in [1, 2]:
+            await interaction.followup.send(
+                "Division must be either 1 or 2.",
+                ephemeral=True
+            )
+            return
+
+        if starting_mmr < 0:
+            await interaction.followup.send(
+                "Starting MMR must be non-negative.",
+                ephemeral=True
+            )
+            return
+
+        db = SessionLocal()
+        try:
+            # Get active season
+            active_season = db.query(Season).filter(Season.is_active == True).first()
+            if not active_season:
+                await interaction.followup.send(
+                    "No active season found. Please create a season first using `/newseason`.",
+                    ephemeral=True
+                )
+                return
+
+            # Check if player already exists
+            existing_player = db.query(Player).filter(
+                Player.discord_id == str(discord_user.id)
+            ).first()
+
+            if existing_player:
+                # Check if already registered for this season
+                existing_stats = db.query(PlayerSeasonStats).filter(
+                    PlayerSeasonStats.player_id == existing_player.id,
+                    PlayerSeasonStats.season_id == active_season.id
+                ).first()
+
+                if existing_stats:
+                    await interaction.followup.send(
+                        f"{discord_user.mention} is already registered for the current season.\n"
+                        f"Current MMR: `{existing_player.current_mmr:.0f}` | Division: `{existing_player.division}`",
+                        ephemeral=True
+                    )
+                    return
+                else:
+                    # Player exists but not registered for this season
+                    player = existing_player
+                    player.current_mmr = starting_mmr
+                    player.division = division
+            else:
+                # Create new player
+                player = Player(
+                    discord_id=str(discord_user.id),
+                    username=discord_user.name,
+                    current_mmr=starting_mmr,
+                    division=division,
+                    unexcused_misses=0
+                )
+                db.add(player)
+                db.flush()  # Get player ID
+
+            # Assign rank tier based on MMR
+            rank_tier = db.query(RankTier).filter(
+                RankTier.mmr_threshold <= starting_mmr
+            ).order_by(RankTier.mmr_threshold.desc()).first()
+
+            if rank_tier:
+                player.rank_tier_id = rank_tier.id
+
+            # Create PlayerSeasonStats
+            season_stats = PlayerSeasonStats(
+                player_id=player.id,
+                season_id=active_season.id,
+                starting_mmr=starting_mmr,
+                peak_mmr=starting_mmr,
+                games_played=0,
+                total_pins=0,
+                season_average=0.0,
+                highest_game=0,
+                highest_series=0
+            )
+            db.add(season_stats)
+
+            db.commit()
+            db.refresh(player)
+
+            logger.info(
+                f"Registered player {discord_user.name} (ID: {discord_user.id}) "
+                f"with MMR {starting_mmr} in division {division}"
+            )
+
+            rank_name = rank_tier.rank_name if rank_tier else "Unranked"
+
+            await interaction.followup.send(
+                f"**Player Registered Successfully!**\n"
+                f"Player: {discord_user.mention}\n"
+                f"Username: `{discord_user.name}`\n"
+                f"Starting MMR: `{starting_mmr}`\n"
+                f"Division: `{division}`\n"
+                f"Rank: `{rank_name}`\n"
+                f"Season: `{active_season.name}`",
+                ephemeral=True
+            )
+
+        except IntegrityError as e:
+            db.rollback()
+            logger.error(f"Failed to register player {discord_user.name}: {e}")
+            await interaction.followup.send(
+                f"Error: Player registration failed. They may already be registered.",
+                ephemeral=True
+            )
+        except Exception as e:
+            db.rollback()
+            logger.error(f"Error registering player: {e}")
+            await interaction.followup.send(
+                f"An error occurred while registering the player: {str(e)}",
+                ephemeral=True
+            )
+        finally:
+            db.close()
+
+    @app_commands.command(name="listplayers", description="List all registered players")
+    @app_commands.default_permissions(administrator=True)
+    async def list_players(self, interaction: discord.Interaction):
+        """List all registered players with their MMR, division, and rank."""
+        await interaction.response.defer(ephemeral=True)
+
+        db = SessionLocal()
+        try:
+            # Get all players ordered by MMR
+            players = db.query(Player).order_by(Player.current_mmr.desc()).limit(20).all()
+
+            if not players:
+                await interaction.followup.send(
+                    "No players registered yet. Use `/registerplayer` to add players.",
+                    ephemeral=True
+                )
+                return
+
+            # Build player list
+            player_lines = []
+            for i, player in enumerate(players, 1):
+                rank_name = player.rank_tier.rank_name if player.rank_tier else "Unranked"
+                player_lines.append(
+                    f"`{i:2d}.` **{player.username}** - "
+                    f"MMR: `{player.current_mmr:.0f}` | "
+                    f"Div: `{player.division}` | "
+                    f"Rank: `{rank_name}`"
+                )
+
+            player_list = "\n".join(player_lines)
+            total_players = db.query(Player).count()
+
+            await interaction.followup.send(
+                f"**Registered Players (Top 20)**\n"
+                f"Total Players: `{total_players}`\n\n"
+                f"{player_list}",
+                ephemeral=True
+            )
+
+        except Exception as e:
+            logger.error(f"Error listing players: {e}")
+            await interaction.followup.send(
+                f"An error occurred while listing players: {str(e)}",
+                ephemeral=True
+            )
+        finally:
+            db.close()
+
+    @app_commands.command(name="setthreshold", description="Set session activation threshold")
+    @app_commands.describe(threshold="Number of Game 1 submissions to activate session")
+    @app_commands.default_permissions(administrator=True)
+    async def set_threshold(self, interaction: discord.Interaction, threshold: int):
+        """Set the session activation threshold."""
+        await interaction.response.defer(ephemeral=True)
+
+        if threshold < 1:
+            await interaction.followup.send(
+                "Threshold must be at least 1.",
+                ephemeral=True
+            )
+            return
+
+        db = SessionLocal()
+        try:
+            config = db.query(Config).filter(Config.key == "session_activation_threshold").first()
+
+            if config:
+                config.value = str(threshold)
+                config.updated_at = datetime.now()
+            else:
+                config = Config(
+                    key="session_activation_threshold",
+                    value=str(threshold),
+                    value_type="int",
+                    description="Number of Game 1 submissions needed to activate session"
+                )
+                db.add(config)
+
+            db.commit()
+            logger.info(f"Session activation threshold set to {threshold}")
+
+            await interaction.followup.send(
+                f"**Activation Threshold Updated!**\n"
+                f"New threshold: `{threshold}` Game 1 submissions\n"
+                f"Sessions will now activate after {threshold} player(s) submit Game 1.",
+                ephemeral=True
+            )
+
+        except Exception as e:
+            db.rollback()
+            logger.error(f"Error setting threshold: {e}")
+            await interaction.followup.send(
+                f"Error setting threshold: {str(e)}",
+                ephemeral=True
+            )
+        finally:
+            db.close()
+
+    @app_commands.command(name="eventmultiplier", description="Set an event score multiplier")
+    @app_commands.default_permissions(administrator=True)
+    async def event_multiplier(
+        self,
+        interaction: discord.Interaction,
+        event_name: str,
+        multiplier: float
+    ):
+        """Set a multiplier for special events."""
+        await interaction.response.defer(ephemeral=True)
+
+        # TODO: Implement event multiplier with @db-specialist
+        await interaction.followup.send(
+            f"Event '{event_name}' multiplier set to: {multiplier}x\n*This command is under construction.*",
+            ephemeral=True
+        )
+
+    @app_commands.command(name="seedplayer", description="Set initial MMR for a player")
+    @app_commands.default_permissions(administrator=True)
+    async def seed_player(
+        self,
+        interaction: discord.Interaction,
+        player: discord.Member,
+        mmr: int
+    ):
+        """Set initial MMR for a new or returning player."""
+        await interaction.response.defer(ephemeral=True)
+
+        # TODO: Implement player seeding with @mmr-calculator
+        await interaction.followup.send(
+            f"Player {player.mention} seeded at {mmr} MMR\n*This command is under construction.*",
+            ephemeral=True
+        )
+
+    @app_commands.command(name="correctscore", description="Correct a submitted score")
+    @app_commands.default_permissions(administrator=True)
+    async def correct_score(
+        self,
+        interaction: discord.Interaction,
+        player: discord.Member,
+        game_number: int,
+        new_score: int
+    ):
+        """Correct a previously submitted score with confirmation."""
+        await interaction.response.defer(ephemeral=True)
+
+        # TODO: Implement score correction with confirmation embed
+        await interaction.followup.send(
+            f"Correcting {player.mention}'s Game {game_number} to {new_score}\n*This command is under construction.*",
+            ephemeral=True
+        )
+
+    @app_commands.command(name="addtestplayers", description="Add 11 test players for simulation (5 Div1, 6 Div2)")
+    @app_commands.default_permissions(administrator=True)
+    async def add_test_players(self, interaction: discord.Interaction):
+        """Add 11 dummy players for testing purposes (5 in Division 1, 6 in Division 2)."""
+        await interaction.response.defer(ephemeral=True)
+
+        db = SessionLocal()
+        try:
+            # Get active season
+            active_season = db.query(Season).filter(Season.is_active == True).first()
+            if not active_season:
+                await interaction.followup.send(
+                    "No active season found. Please create a season first using `/newseason`.",
+                    ephemeral=True
+                )
+                return
+
+            # Test player data
+            test_players = [
+                # Division 1 (5 players)
+                {"name": "TestPlayer1", "mmr": 8400, "division": 1, "discord_id": "100001"},
+                {"name": "TestPlayer2", "mmr": 8100, "division": 1, "discord_id": "100002"},
+                {"name": "TestPlayer3", "mmr": 7800, "division": 1, "discord_id": "100003"},
+                {"name": "TestPlayer4", "mmr": 7500, "division": 1, "discord_id": "100004"},
+                {"name": "TestPlayer5", "mmr": 7200, "division": 1, "discord_id": "100005"},
+
+                # Division 2 (6 players)
+                {"name": "TestPlayer6", "mmr": 7100, "division": 2, "discord_id": "100006"},
+                {"name": "TestPlayer7", "mmr": 6900, "division": 2, "discord_id": "100007"},
+                {"name": "TestPlayer8", "mmr": 6700, "division": 2, "discord_id": "100008"},
+                {"name": "TestPlayer9", "mmr": 6500, "division": 2, "discord_id": "100009"},
+                {"name": "TestPlayer10", "mmr": 6300, "division": 2, "discord_id": "100010"},
+                {"name": "TestPlayer11", "mmr": 6100, "division": 2, "discord_id": "100011"},
+            ]
+
+            added_players = []
+            skipped_players = []
+
+            for test_data in test_players:
+                # Check if already exists
+                existing = db.query(Player).filter(
+                    Player.discord_id == test_data["discord_id"]
+                ).first()
+
+                if existing:
+                    skipped_players.append(test_data["name"])
+                    continue
+
+                # Create player
+                player = Player(
+                    discord_id=test_data["discord_id"],
+                    username=test_data["name"],
+                    current_mmr=test_data["mmr"],
+                    division=test_data["division"],
+                    unexcused_misses=0
+                )
+                db.add(player)
+                db.flush()
+
+                # Assign rank tier
+                rank_tier = db.query(RankTier).filter(
+                    RankTier.mmr_threshold <= test_data["mmr"]
+                ).order_by(RankTier.mmr_threshold.desc()).first()
+
+                if rank_tier:
+                    player.rank_tier_id = rank_tier.id
+
+                # Create season stats
+                season_stats = PlayerSeasonStats(
+                    player_id=player.id,
+                    season_id=active_season.id,
+                    starting_mmr=test_data["mmr"],
+                    peak_mmr=test_data["mmr"],
+                    games_played=0,
+                    total_pins=0,
+                    season_average=0.0,
+                    highest_game=0,
+                    highest_series=0
+                )
+                db.add(season_stats)
+                added_players.append(f"{test_data['name']} (MMR {test_data['mmr']}, Div {test_data['division']})")
+
+            db.commit()
+
+            result_msg = "**Test Players Added!**\n\n"
+            if added_players:
+                result_msg += "✅ Added:\n" + "\n".join(f"- {p}" for p in added_players)
+            if skipped_players:
+                result_msg += f"\n\n⏭️ Skipped (already exist):\n" + "\n".join(f"- {p}" for p in skipped_players)
+
+            result_msg += "\n\n💡 **Tip:** Use `/removetestplayers` to clean them up when done testing."
+
+            await interaction.followup.send(result_msg, ephemeral=True)
+
+        except Exception as e:
+            db.rollback()
+            logger.error(f"Error adding test players: {e}")
+            await interaction.followup.send(
+                f"Error adding test players: {str(e)}",
+                ephemeral=True
+            )
+        finally:
+            db.close()
+
+    @app_commands.command(name="removetestplayers", description="Remove test players")
+    @app_commands.default_permissions(administrator=True)
+    async def remove_test_players(self, interaction: discord.Interaction):
+        """Remove all test players from the database."""
+        await interaction.response.defer(ephemeral=True)
+
+        db = SessionLocal()
+        try:
+            # Find test players (discord_id starts with "10000")
+            test_players = db.query(Player).filter(
+                Player.discord_id.like("10000%")
+            ).all()
+
+            if not test_players:
+                await interaction.followup.send(
+                    "No test players found.",
+                    ephemeral=True
+                )
+                return
+
+            removed_names = [p.username for p in test_players]
+
+            # Delete them (cascade will handle related records)
+            for player in test_players:
+                db.delete(player)
+
+            db.commit()
+
+            await interaction.followup.send(
+                f"**Test Players Removed!**\n\n"
+                f"Removed {len(removed_names)} test players:\n" +
+                "\n".join(f"- {name}" for name in removed_names),
+                ephemeral=True
+            )
+
+        except Exception as e:
+            db.rollback()
+            logger.error(f"Error removing test players: {e}")
+            await interaction.followup.send(
+                f"Error removing test players: {str(e)}",
+                ephemeral=True
+            )
+        finally:
+            db.close()
+
+    @app_commands.command(name="simulatescores", description="Add random scores for all test players")
+    @app_commands.default_permissions(administrator=True)
+    async def simulate_scores(self, interaction: discord.Interaction):
+        """Automatically submit random scores for all test players in the current session."""
+        await interaction.response.defer(ephemeral=True)
+
+        import random
+
+        db = SessionLocal()
+        try:
+            # Get current session
+            session = db.query(Session).filter(
+                Session.is_revealed == False
+            ).order_by(Session.created_at.desc()).first()
+
+            if not session:
+                await interaction.followup.send(
+                    "No active session found!",
+                    ephemeral=True
+                )
+                return
+
+            # Get test players
+            test_players = db.query(Player).filter(
+                Player.discord_id.like("10000%")
+            ).all()
+
+            if not test_players:
+                await interaction.followup.send(
+                    "No test players found. Use `/addtestplayers` first.",
+                    ephemeral=True
+                )
+                return
+
+            submissions = []
+
+            for player in test_players:
+                # Check them in first
+                existing_checkin = db.query(SessionCheckIn).filter(
+                    SessionCheckIn.session_id == session.id,
+                    SessionCheckIn.player_id == player.id
+                ).first()
+
+                if not existing_checkin:
+                    checkin = SessionCheckIn(
+                        session_id=session.id,
+                        player_id=player.id,
+                        has_submitted=False
+                    )
+                    db.add(checkin)
+                    db.flush()
+
+                # Generate random scores (150-250 range)
+                game1 = random.randint(150, 250)
+                game2 = random.randint(150, 250)
+
+                # Submit Game 1
+                score1 = Score(
+                    player_id=player.id,
+                    session_id=session.id,
+                    game_number=1,
+                    score=game1,
+                    mmr_before=player.current_mmr,
+                    mmr_after=player.current_mmr,
+                    mmr_change=0.0,
+                    bonus_applied=0.0
+                )
+                db.add(score1)
+
+                # Submit Game 2
+                score2 = Score(
+                    player_id=player.id,
+                    session_id=session.id,
+                    game_number=2,
+                    score=game2,
+                    mmr_before=player.current_mmr,
+                    mmr_after=player.current_mmr,
+                    mmr_change=0.0,
+                    bonus_applied=0.0
+                )
+                db.add(score2)
+
+                # Mark as submitted
+                if existing_checkin:
+                    existing_checkin.has_submitted = True
+                else:
+                    # Update the newly created check-in
+                    db.query(SessionCheckIn).filter(
+                        SessionCheckIn.session_id == session.id,
+                        SessionCheckIn.player_id == player.id
+                    ).update({"has_submitted": True})
+
+                submissions.append(f"{player.username}: {game1}, {game2} (Total: {game1+game2})")
+
+            db.commit()
+
+            # Check if session should activate
+            game1_count = db.query(Score).filter(
+                Score.session_id == session.id,
+                Score.game_number == 1
+            ).count()
+
+            # Get activation threshold from config
+            threshold_config = db.query(Config).filter(Config.key == "session_activation_threshold").first()
+            activation_threshold = int(threshold_config.value) if threshold_config else 3
+
+            if not session.is_active and game1_count >= activation_threshold:
+                session.is_active = True
+                db.commit()
+
+            await interaction.followup.send(
+                f"**Scores Simulated!**\n\n"
+                f"Submitted scores for {len(test_players)} test players:\n\n" +
+                "\n".join(submissions) +
+                f"\n\n{'🎉 Session activated!' if session.is_active else 'Waiting for session activation...'}",
+                ephemeral=True
+            )
+
+        except Exception as e:
+            db.rollback()
+            logger.error(f"Error simulating scores: {e}")
+            await interaction.followup.send(
+                f"Error simulating scores: {str(e)}",
+                ephemeral=True
+            )
+        finally:
+            db.close()
+
+    @app_commands.command(name="cancelsession", description="Cancel the current unrevealed session")
+    @app_commands.default_permissions(administrator=True)
+    async def cancel_session(self, interaction: discord.Interaction):
+        """Cancel and delete the current unrevealed session."""
+        await interaction.response.defer(ephemeral=True)
+
+        db = SessionLocal()
+        try:
+            # Get current unrevealed session
+            session = db.query(Session).filter(
+                Session.is_revealed == False
+            ).order_by(Session.created_at.desc()).first()
+
+            if not session:
+                await interaction.followup.send(
+                    "No active session to cancel.",
+                    ephemeral=True
+                )
+                return
+
+            session_id = session.id
+            session_date = session.session_date
+
+            # Delete the session (cascade will delete related records)
+            db.delete(session)
+            db.commit()
+
+            logger.info(f"Session {session_id} cancelled by {interaction.user.name}")
+
+            await interaction.followup.send(
+                f"**Session Cancelled!**\n\n"
+                f"Session ID: {session_id}\n"
+                f"Date: {session_date}\n\n"
+                f"All check-ins and scores for this session have been removed.\n"
+                f"You can now start a new session with `/startcheckin`.",
+                ephemeral=True
+            )
+
+        except Exception as e:
+            db.rollback()
+            logger.error(f"Error cancelling session: {e}")
+            await interaction.followup.send(
+                f"Error cancelling session: {str(e)}",
+                ephemeral=True
+            )
+        finally:
+            db.close()
+
+    @app_commands.command(name="clearall", description="🚨 Clear ALL sessions and scores (TESTING ONLY)")
+    @app_commands.default_permissions(administrator=True)
+    async def clear_all(self, interaction: discord.Interaction):
+        """Clear all sessions and scores. WARNING: This cannot be undone!"""
+        await interaction.response.defer(ephemeral=True)
+
+        db = SessionLocal()
+        try:
+            # Count what will be deleted
+            session_count = db.query(Session).count()
+            score_count = db.query(Score).count()
+            checkin_count = db.query(SessionCheckIn).count()
+
+            if session_count == 0:
+                await interaction.followup.send(
+                    "No sessions to clear.",
+                    ephemeral=True
+                )
+                return
+
+            # Delete all sessions (cascade will delete scores and check-ins)
+            db.query(Session).delete()
+            db.commit()
+
+            logger.warning(
+                f"ALL DATA CLEARED by {interaction.user.name}: "
+                f"{session_count} sessions, {score_count} scores, {checkin_count} check-ins"
+            )
+
+            await interaction.followup.send(
+                f"**🚨 All Data Cleared!**\n\n"
+                f"Deleted:\n"
+                f"- {session_count} sessions\n"
+                f"- {score_count} scores\n"
+                f"- {checkin_count} check-ins\n\n"
+                f"⚠️ Player data and season stats were preserved.\n"
+                f"You can now start fresh with `/startcheckin`.",
+                ephemeral=True
+            )
+
+        except Exception as e:
+            db.rollback()
+            logger.error(f"Error clearing sessions: {e}")
+            await interaction.followup.send(
+                f"Error clearing sessions: {str(e)}",
+                ephemeral=True
+            )
+        finally:
+            db.close()
+
+
+async def setup(bot):
+    await bot.add_cog(AdminCog(bot))
+    logger.info("Admin cog loaded")
