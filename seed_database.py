@@ -291,7 +291,7 @@ def main():
         print("\nNext steps:")
         print("  1. Start the bot: python bot.py")
         print("  2. Run /newseason to create your first season")
-        print("  3. Run /registerplayer to add players")
+        print("  3. Run /addplayer to add players")
         print("  4. Run /startcheckin to begin a bowling session")
         print("=" * 60)
 

@@ -3,6 +3,7 @@ from discord import app_commands
 from discord.ext import commands, tasks
 from datetime import datetime, time, date
 import logging
+import asyncio
 from typing import Optional, Dict, Any, List
 from sqlalchemy.orm import Session as DBSession
 
@@ -32,21 +33,118 @@ class SessionCog(commands.Cog):
         self.bot = bot
 
         # Start the check-in task
-        # self.check_in_task.start()
+        self.check_in_task.start()
 
     def cog_unload(self):
         """Clean up when cog is unloaded."""
-        # self.check_in_task.cancel()
-        pass
+        self.check_in_task.cancel()
 
-    # @tasks.loop(time=time(hour=20, minute=30))  # 8:30 PM
+    @tasks.loop(time=time(hour=20, minute=30))  # 8:30 PM
     async def check_in_task(self):
         """
         Automated task to post check-in embed at 8:30 PM.
-        TODO: Implement with @discord-handler
+        Posts check-in to all configured channels or creates a session if needed.
         """
         logger.info("Check-in time! Posting check-in embed...")
-        # TODO: Post check-in embed with reactions
+
+        db = SessionLocal()
+        try:
+            # Get active season
+            season = db.query(Season).filter(Season.is_active == True).first()
+            if not season:
+                logger.warning("No active season found for automated check-in")
+                return
+
+            # Check if there's already an unrevealed session
+            existing_session = db.query(Session).filter(
+                Session.season_id == season.id,
+                Session.is_revealed == False
+            ).first()
+
+            if existing_session:
+                logger.info(
+                    f"Session {existing_session.id} already active, skipping automated check-in"
+                )
+                return
+
+            # Create new session
+            new_session = Session(
+                session_date=date.today(),
+                season_id=season.id,
+                is_active=False,
+                is_revealed=False,
+                is_completed=False,
+                event_type='normal',
+                event_multiplier=1.0
+            )
+            db.add(new_session)
+            db.commit()
+            db.refresh(new_session)
+
+            logger.info(f"Created automated session {new_session.id} for season {season.name}")
+
+            # Get all registered players by division
+            div1_players = db.query(Player).filter(Player.division == 1).all()
+            div2_players = db.query(Player).filter(Player.division == 2).all()
+
+            # Format player data for embed
+            div1_data = [{'name': p.username, 'status': 'pending'} for p in div1_players]
+            div2_data = [{'name': p.username, 'status': 'pending'} for p in div2_players]
+
+            # Create check-in embed
+            embed = create_checkin_embed(
+                session_date=datetime.combine(new_session.session_date, datetime.min.time()),
+                division_1_players=div1_data,
+                division_2_players=div2_data
+            )
+
+            # Try to post to each guild the bot is in
+            for guild in self.bot.guilds:
+                # Find a suitable channel (look for general or check-in related channels)
+                target_channel = None
+                for channel in guild.text_channels:
+                    if channel.permissions_for(guild.me).send_messages:
+                        if any(name in channel.name.lower() for name in ['general', 'bowling', 'check-in', 'session']):
+                            target_channel = channel
+                            break
+
+                # Fallback to first available channel
+                if not target_channel:
+                    for channel in guild.text_channels:
+                        if channel.permissions_for(guild.me).send_messages:
+                            target_channel = channel
+                            break
+
+                if not target_channel:
+                    logger.warning(f"No suitable channel found in guild {guild.name}")
+                    continue
+
+                try:
+                    message = await target_channel.send(embed=embed)
+                    await message.add_reaction("✅")
+                    await message.add_reaction("❌")
+                    await message.pin()
+
+                    # Store message ID and channel ID
+                    new_session.check_in_message_id = str(message.id)
+                    new_session.check_in_channel_id = str(target_channel.id)
+                    db.commit()
+
+                    logger.info(
+                        f"Posted automated check-in (message ID: {message.id}) "
+                        f"in {guild.name} channel {target_channel.name}"
+                    )
+                    break  # Only post to first guild
+
+                except discord.Forbidden:
+                    logger.error(f"Missing permissions to post in {target_channel.name}")
+                except discord.HTTPException as e:
+                    logger.error(f"Failed to post check-in: {e}")
+
+        except Exception as e:
+            logger.error(f"Error in automated check-in task: {e}")
+        finally:
+            db.close()
 
     @app_commands.command(name="startcheckin", description="Start a new session and post check-in")
     @app_commands.default_permissions(administrator=True)
@@ -320,7 +418,8 @@ class SessionCog(commands.Cog):
                         f"All players have submitted."
                     )
                     auto_reveal_msg = "\n\nAll players have submitted! Ready for reveal."
-                    # TODO: Trigger auto-reveal or notify admin
+                    # Notify admin of ready-to-reveal state
+                    await self._notify_auto_reveal_ready(session.id, db)
 
             remaining_msg = ""
             if game_number == 1:
@@ -439,6 +538,193 @@ class SessionCog(commands.Cog):
             logger.error(f"Error editing score: {e}")
             await interaction.followup.send(
                 f"Error editing score: {str(e)}",
+                ephemeral=True
+            )
+        finally:
+            db.close()
+
+    @app_commands.command(name="correctscore", description="Admin command to correct a player's score")
+    @app_commands.describe(
+        player="Player whose score to correct",
+        game_number="Which game to correct (1 or 2)",
+        new_score="The corrected score (0-300)"
+    )
+    @app_commands.default_permissions(administrator=True)
+    async def correct_score(
+        self,
+        interaction: discord.Interaction,
+        player: discord.Member,
+        game_number: int,
+        new_score: int
+    ):
+        """
+        Admin command to correct a previously submitted score.
+
+        Creates a confirmation embed with reactions. Only admin can confirm.
+        Shows old vs new score before applying the correction.
+        """
+        await interaction.response.defer(ephemeral=True)
+
+        # Validate inputs
+        if game_number not in [1, 2]:
+            await interaction.followup.send(
+                "Invalid game number! Must be 1 or 2.",
+                ephemeral=True
+            )
+            return
+
+        if not (0 <= new_score <= 300):
+            await interaction.followup.send(
+                "Invalid score! Score must be between 0 and 300.",
+                ephemeral=True
+            )
+            return
+
+        db = SessionLocal()
+        try:
+            # Get current unrevealed session
+            session = db.query(Session).filter(
+                Session.is_revealed == False
+            ).order_by(Session.created_at.desc()).first()
+
+            if not session:
+                await interaction.followup.send(
+                    "No active session found!",
+                    ephemeral=True
+                )
+                return
+
+            # Get player from database
+            target_player = db.query(Player).filter(
+                Player.discord_id == str(player.id)
+            ).first()
+
+            if not target_player:
+                await interaction.followup.send(
+                    f"Player {player.mention} is not registered!",
+                    ephemeral=True
+                )
+                return
+
+            # Find the score to correct
+            score_entry = db.query(Score).filter(
+                Score.player_id == target_player.id,
+                Score.session_id == session.id,
+                Score.game_number == game_number
+            ).first()
+
+            if not score_entry:
+                await interaction.followup.send(
+                    f"{player.mention} hasn't submitted a score for Game {game_number} yet!",
+                    ephemeral=True
+                )
+                return
+
+            old_score = score_entry.score
+
+            # Create confirmation embed
+            embed = discord.Embed(
+                title="Admin Score Correction",
+                description=f"Confirm correction for **{player.display_name}**",
+                color=discord.Color.orange(),
+                timestamp=datetime.now()
+            )
+
+            embed.add_field(
+                name="Player",
+                value=player.mention,
+                inline=False
+            )
+
+            embed.add_field(
+                name="Game",
+                value=str(game_number),
+                inline=True
+            )
+
+            embed.add_field(
+                name="Old Score",
+                value=str(old_score),
+                inline=True
+            )
+
+            embed.add_field(
+                name="New Score",
+                value=str(new_score),
+                inline=True
+            )
+
+            embed.set_footer(text="Click reactions: ✅ = Confirm, ❌ = Cancel")
+
+            # Send confirmation message
+            confirmation_message = await interaction.followup.send(
+                embed=embed,
+                ephemeral=True
+            )
+
+            # Add reactions
+            await confirmation_message.add_reaction("✅")
+            await confirmation_message.add_reaction("❌")
+
+            # Wait for admin reaction
+            def reaction_check(reaction, user):
+                return (
+                    user.id == interaction.user.id
+                    and str(reaction.emoji) in ["✅", "❌"]
+                    and reaction.message.id == confirmation_message.id
+                )
+
+            try:
+                reaction, _ = await self.bot.wait_for(
+                    'reaction_add',
+                    timeout=300.0,  # 5 minute timeout
+                    check=reaction_check
+                )
+
+                if str(reaction.emoji) == "✅":
+                    # Confirmed: Update the score
+                    score_entry.score = new_score
+                    db.commit()
+
+                    logger.info(
+                        f"Admin {interaction.user.name} corrected "
+                        f"{target_player.username} Game {game_number}: "
+                        f"{old_score} -> {new_score}"
+                    )
+
+                    # Update status embed
+                    await self._update_status_embed(session.id, db)
+
+                    # Send confirmation
+                    await interaction.followup.send(
+                        f"✅ Score corrected!\n"
+                        f"**Player:** {player.mention}\n"
+                        f"**Game {game_number}:** {old_score} -> **{new_score}**",
+                        ephemeral=True
+                    )
+
+                else:
+                    # Cancelled
+                    logger.info(
+                        f"Admin {interaction.user.name} cancelled score correction for "
+                        f"{target_player.username} Game {game_number}"
+                    )
+
+                    await interaction.followup.send(
+                        "Score correction cancelled.",
+                        ephemeral=True
+                    )
+
+            except asyncio.TimeoutError:
+                await interaction.followup.send(
+                    "Score correction timed out (5 minute limit).",
+                    ephemeral=True
+                )
+
+        except Exception as e:
+            logger.error(f"Error correcting score: {e}")
+            await interaction.followup.send(
+                f"Error correcting score: {str(e)}",
                 ephemeral=True
             )
         finally:
@@ -843,6 +1129,64 @@ class SessionCog(commands.Cog):
 
     # Helper Methods
 
+    async def _notify_auto_reveal_ready(self, session_id: int, db: DBSession) -> None:
+        """
+        Notify admin(s) that a session is ready for auto-reveal.
+
+        Posts a notification embed to the session channel mentioning administrators.
+        """
+        try:
+            session = db.query(Session).get(session_id)
+            if not session or not session.check_in_channel_id:
+                logger.warning(f"Cannot notify: session {session_id} missing channel_id")
+                return
+
+            channel = self.bot.get_channel(int(session.check_in_channel_id))
+            if not channel:
+                logger.error(f"Cannot find channel {session.check_in_channel_id}")
+                return
+
+            # Create notification embed
+            embed = discord.Embed(
+                title="Ready for Reveal",
+                description="All players have submitted their scores!",
+                color=discord.Color.gold(),
+                timestamp=datetime.now()
+            )
+
+            embed.add_field(
+                name="Session",
+                value=f"Session {session_id}",
+                inline=False
+            )
+
+            embed.add_field(
+                name="Next Step",
+                value="Use `/reveal` to calculate MMR and reveal results",
+                inline=False
+            )
+
+            embed.set_footer(text="This is an automated notification")
+
+            # Get admin users from guild
+            guild = channel.guild
+            admin_mentions = []
+            for member in guild.members:
+                if member.guild_permissions.administrator and not member.bot:
+                    admin_mentions.append(member.mention)
+
+            # Post notification
+            mention_str = " ".join(admin_mentions) if admin_mentions else "@admins"
+            await channel.send(
+                f"{mention_str}",
+                embed=embed
+            )
+
+            logger.info(f"Notified admins that session {session_id} is ready for reveal")
+
+        except Exception as e:
+            logger.error(f"Error notifying auto-reveal ready: {e}")
+
     def _check_auto_reveal(self, session_id: int, db: DBSession) -> bool:
         """Check if all checked-in players have submitted both games."""
         check_ins = db.query(SessionCheckIn).filter(
@@ -928,7 +1272,7 @@ class SessionCog(commands.Cog):
 
         return players_data
 
-    def _get_config_value(self, db: DBSession, key: str, default: Any, value_type: type) -> Any:
+    def _get_config_value(self, db: DBSession, key: str, default: Any, value_type: type = None) -> Any:
         """Get a configuration value from the database."""
         config = db.query(Config).filter(Config.key == key).first()
         if config:

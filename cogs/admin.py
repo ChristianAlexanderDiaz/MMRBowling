@@ -159,21 +159,21 @@ class AdminCog(commands.Cog):
         finally:
             db.close()
 
-    @app_commands.command(name="registerplayer", description="Register a new player for the current season")
+    @app_commands.command(name="addplayer", description="Add a new player for the current season")
     @app_commands.describe(
-        discord_user="Discord member to register",
+        discord_user="Discord member to add",
         starting_mmr="Initial MMR (default: 8000)",
         division="Division 1 or 2 (default: 1)"
     )
     @app_commands.default_permissions(administrator=True)
-    async def register_player(
+    async def add_player(
         self,
         interaction: discord.Interaction,
         discord_user: discord.Member,
         starting_mmr: int = 8000,
         division: int = 1
     ):
-        """Register a new player for the current active season."""
+        """Add a new player for the current active season."""
         await interaction.response.defer(ephemeral=True)
 
         if division not in [1, 2]:
@@ -310,7 +310,7 @@ class AdminCog(commands.Cog):
 
             if not players:
                 await interaction.followup.send(
-                    "No players registered yet. Use `/registerplayer` to add players.",
+                    "No players registered yet. Use `/addplayer` to add players.",
                     ephemeral=True
                 )
                 return
@@ -396,6 +396,10 @@ class AdminCog(commands.Cog):
             db.close()
 
     @app_commands.command(name="eventmultiplier", description="Set an event score multiplier")
+    @app_commands.describe(
+        event_name="Event name (e.g., 'tournament', 'special_match')",
+        multiplier="Multiplier value (e.g., 1.5 for 50% bonus)"
+    )
     @app_commands.default_permissions(administrator=True)
     async def event_multiplier(
         self,
@@ -406,13 +410,80 @@ class AdminCog(commands.Cog):
         """Set a multiplier for special events."""
         await interaction.response.defer(ephemeral=True)
 
-        # TODO: Implement event multiplier with @db-specialist
-        await interaction.followup.send(
-            f"Event '{event_name}' multiplier set to: {multiplier}x\n*This command is under construction.*",
-            ephemeral=True
-        )
+        # Validate multiplier
+        if multiplier <= 0:
+            await interaction.followup.send(
+                "Multiplier must be a positive number.",
+                ephemeral=True
+            )
+            return
+
+        db = SessionLocal()
+        try:
+            config_key = f"event_{event_name}_multiplier"
+
+            # Check if config already exists
+            config = db.query(Config).filter(Config.key == config_key).first()
+
+            if config:
+                # Update existing
+                old_multiplier = float(config.value)
+                config.value = str(multiplier)
+                config.updated_at = datetime.now()
+            else:
+                # Create new
+                old_multiplier = None
+                config = Config(
+                    key=config_key,
+                    value=str(multiplier),
+                    value_type="float",
+                    description=f"Multiplier for {event_name} event"
+                )
+                db.add(config)
+
+            db.commit()
+            logger.info(f"Event multiplier set for '{event_name}': {multiplier}x")
+
+            if old_multiplier is not None:
+                await interaction.followup.send(
+                    f"**Event Multiplier Updated!**\n"
+                    f"Event: `{event_name}`\n"
+                    f"Old Multiplier: `{old_multiplier}x`\n"
+                    f"New Multiplier: `{multiplier}x`\n"
+                    f"This will apply to future sessions with this event type.",
+                    ephemeral=True
+                )
+            else:
+                await interaction.followup.send(
+                    f"**Event Multiplier Created!**\n"
+                    f"Event: `{event_name}`\n"
+                    f"Multiplier: `{multiplier}x`\n"
+                    f"This will apply to future sessions with this event type.",
+                    ephemeral=True
+                )
+
+        except ValueError:
+            db.rollback()
+            logger.error(f"Invalid multiplier value: {multiplier}")
+            await interaction.followup.send(
+                "Invalid multiplier value. Please use a number (e.g., 1.5).",
+                ephemeral=True
+            )
+        except Exception as e:
+            db.rollback()
+            logger.error(f"Error setting event multiplier: {e}")
+            await interaction.followup.send(
+                f"An error occurred while setting the event multiplier: {str(e)}",
+                ephemeral=True
+            )
+        finally:
+            db.close()
 
     @app_commands.command(name="seedplayer", description="Set initial MMR for a player")
+    @app_commands.describe(
+        player="Discord member to update",
+        mmr="New MMR value"
+    )
     @app_commands.default_permissions(administrator=True)
     async def seed_player(
         self,
@@ -423,11 +494,93 @@ class AdminCog(commands.Cog):
         """Set initial MMR for a new or returning player."""
         await interaction.response.defer(ephemeral=True)
 
-        # TODO: Implement player seeding with @mmr-calculator
-        await interaction.followup.send(
-            f"Player {player.mention} seeded at {mmr} MMR\n*This command is under construction.*",
-            ephemeral=True
-        )
+        # Validate MMR
+        if mmr < 0:
+            await interaction.followup.send(
+                "MMR must be non-negative.",
+                ephemeral=True
+            )
+            return
+
+        db = SessionLocal()
+        try:
+            # Find the player by Discord ID
+            db_player = db.query(Player).filter(
+                Player.discord_id == str(player.id)
+            ).first()
+
+            if not db_player:
+                await interaction.followup.send(
+                    f"{player.mention} is not registered in the database.\n"
+                    f"Please use `/addplayer` to register them first.",
+                    ephemeral=True
+                )
+                return
+
+            # Store old MMR and rank for response
+            old_mmr = db_player.current_mmr
+            old_rank_tier = db_player.rank_tier
+
+            # Update current MMR
+            db_player.current_mmr = mmr
+            db_player.updated_at = datetime.now()
+
+            # Find and assign appropriate rank tier based on new MMR
+            new_rank_tier = db.query(RankTier).filter(
+                RankTier.mmr_threshold <= mmr
+            ).order_by(RankTier.mmr_threshold.desc()).first()
+
+            if new_rank_tier:
+                db_player.rank_tier_id = new_rank_tier.id
+            else:
+                db_player.rank_tier_id = None
+
+            # Update PlayerSeasonStats if player is in current season
+            active_season = db.query(Season).filter(Season.is_active == True).first()
+            if active_season:
+                season_stats = db.query(PlayerSeasonStats).filter(
+                    PlayerSeasonStats.player_id == db_player.id,
+                    PlayerSeasonStats.season_id == active_season.id
+                ).first()
+
+                if season_stats:
+                    # Update starting_mmr and peak_mmr
+                    season_stats.starting_mmr = mmr
+                    # Only update peak_mmr if new MMR is higher
+                    if mmr > season_stats.peak_mmr:
+                        season_stats.peak_mmr = mmr
+                    season_stats.updated_at = datetime.now()
+
+            db.commit()
+            db.refresh(db_player)
+
+            logger.info(
+                f"Player {player.name} (ID: {player.id}) MMR updated from {old_mmr} to {mmr}"
+            )
+
+            # Format response
+            old_rank_name = old_rank_tier.rank_name if old_rank_tier else "Unranked"
+            new_rank_name = new_rank_tier.rank_name if new_rank_tier else "Unranked"
+
+            await interaction.followup.send(
+                f"**Player MMR Updated!**\n"
+                f"Player: {player.mention}\n"
+                f"Old MMR: `{old_mmr:.0f}` ({old_rank_name})\n"
+                f"New MMR: `{mmr}` ({new_rank_name})\n"
+                f"Change: `{mmr - old_mmr:+.0f}`\n"
+                f"Updated: Current MMR and season stats (if active season exists)",
+                ephemeral=True
+            )
+
+        except Exception as e:
+            db.rollback()
+            logger.error(f"Error seeding player MMR: {e}")
+            await interaction.followup.send(
+                f"An error occurred while updating player MMR: {str(e)}",
+                ephemeral=True
+            )
+        finally:
+            db.close()
 
     @app_commands.command(name="correctscore", description="Correct a submitted score")
     @app_commands.default_permissions(administrator=True)
@@ -954,7 +1107,7 @@ class AdminCog(commands.Cog):
                           "\n✅ Added " + str(config_count) + " config values"
                           "\n✅ Added " + str(bonus_count) + " bonus configs"
                           + season_msg +
-                          "\n\nNext: Use `/registerplayer` to add players with custom starting MMR")
+                          "\n\nNext: Use `/addplayer` to add players with custom starting MMR")
 
             await interaction.followup.send(response_msg, ephemeral=True)
 
