@@ -1050,11 +1050,11 @@ class AdminCog(commands.Cog):
 
             # === SEED BONUS CONFIG ===
             bonuses = [
-                {"bonus_name": "200 Club", "bonus_amount": 5.0, "condition_type": "score_threshold", "condition_value": {"threshold": 200}, "description": "Score 200+ in a game", "is_active": True},
-                {"bonus_name": "225 Club", "bonus_amount": 8.0, "condition_type": "score_threshold", "condition_value": {"threshold": 225}, "description": "Score 225+ in a game", "is_active": True},
-                {"bonus_name": "250 Club", "bonus_amount": 12.0, "condition_type": "score_threshold", "condition_value": {"threshold": 250}, "description": "Score 250+ in a game", "is_active": True},
-                {"bonus_name": "275 Club", "bonus_amount": 18.0, "condition_type": "score_threshold", "condition_value": {"threshold": 275}, "description": "Score 275+ in a game", "is_active": True},
-                {"bonus_name": "Perfect Game", "bonus_amount": 50.0, "condition_type": "score_threshold", "condition_value": {"threshold": 300}, "description": "Perfect 300 game", "is_active": True},
+                {"bonus_name": "200 Club", "bonus_amount": 50.0, "condition_type": "score_threshold", "condition_value": {"threshold": 200}, "description": "Score 200+ in a game", "is_active": True},
+                {"bonus_name": "225 Club", "bonus_amount": 80.0, "condition_type": "score_threshold", "condition_value": {"threshold": 225}, "description": "Score 225+ in a game", "is_active": True},
+                {"bonus_name": "250 Club", "bonus_amount": 120.0, "condition_type": "score_threshold", "condition_value": {"threshold": 250}, "description": "Score 250+ in a game", "is_active": True},
+                {"bonus_name": "275 Club", "bonus_amount": 180.0, "condition_type": "score_threshold", "condition_value": {"threshold": 275}, "description": "Score 275+ in a game", "is_active": True},
+                {"bonus_name": "Perfect Game", "bonus_amount": 500.0, "condition_type": "score_threshold", "condition_value": {"threshold": 300}, "description": "Perfect 300 game", "is_active": True},
             ]
 
             bonus_count = 0
