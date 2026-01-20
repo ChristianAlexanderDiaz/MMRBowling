@@ -33,7 +33,10 @@ class SessionCog(commands.Cog):
         self.bot = bot
 
         # Start the check-in task
-        self.check_in_task.start()
+        try:
+            self.check_in_task.start()
+        except RuntimeError as e:
+            logger.warning(f"Check-in task already running or failed to start: {e}")
 
     def cog_unload(self):
         """Clean up when cog is unloaded."""
