@@ -1339,7 +1339,12 @@ class SessionCog(commands.Cog):
                 player_id=player_id,
                 season_id=season_id,
                 starting_mmr=player.current_mmr,
-                peak_mmr=new_mmr
+                peak_mmr=new_mmr,
+                games_played=0,
+                total_pins=0,
+                season_average=0.0,
+                highest_game=0,
+                highest_series=0
             )
             db.add(stats)
 
