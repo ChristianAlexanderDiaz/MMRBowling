@@ -540,7 +540,7 @@ def _build_detailed_results_table(results: List[Dict[str, Any]]) -> str:
     Build clean MMR change table for results embed.
 
     Format:
-    MicheL         : 450 | 7275 --> 7448 (+173)
+    MicheL         : 450 | 7275 --> 7448 (+400 elo +27 bonus = +427)
     B. NetanyaSwoop: 480 | 8927 --> 9100 (+173)
     """
     if not results:
@@ -554,9 +554,16 @@ def _build_detailed_results_table(results: List[Dict[str, Any]]) -> str:
         old_mmr = int(result['old_mmr'])
         new_mmr = int(result['new_mmr'])
         mmr_change = result['mmr_change']
+        elo_change = int(result.get('elo_change', mmr_change))
+        bonus_mmr = int(result.get('bonus_mmr', 0))
 
-        # Format: Name : Pins | OldMMR --> NewMMR (Change)
-        line = f"{name:16}: {series:3} | {old_mmr:5.0f} --> {new_mmr:5.0f} ({mmr_change:+d})"
+        # Format breakdown if bonus exists
+        if bonus_mmr != 0:
+            change_text = f"({elo_change:+d} elo {bonus_mmr:+d} bonus = {mmr_change:+d})"
+        else:
+            change_text = f"({mmr_change:+d})"
+
+        line = f"{name:16}: {series:3} | {old_mmr:5.0f} --> {new_mmr:5.0f} {change_text}"
         lines.append(line)
 
     return "\n".join(lines)
