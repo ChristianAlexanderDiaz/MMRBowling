@@ -1060,7 +1060,12 @@ class AdminCog(commands.Cog):
             bonus_count = 0
             for bonus_data in bonuses:
                 existing = db.query(BonusConfig).filter(BonusConfig.bonus_name == bonus_data["bonus_name"]).first()
-                if not existing:
+                if existing:
+                    # Update existing bonus with new amount
+                    existing.bonus_amount = bonus_data["bonus_amount"]
+                    existing.is_active = bonus_data["is_active"]
+                else:
+                    # Create new bonus
                     bonus = BonusConfig(**bonus_data)
                     db.add(bonus)
                     bonus_count += 1
