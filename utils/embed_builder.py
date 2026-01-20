@@ -527,11 +527,11 @@ def _build_status_table(players: List[Dict[str, Any]]) -> str:
 
 def _build_detailed_results_table(results: List[Dict[str, Any]]) -> str:
     """
-    Build clean, modern results table for results embed.
+    Build clean MMR change table for results embed.
 
     Format:
-    1. Player Name        450 pins → 8016 MMR (+216)
-       Gold II ⬆️
+    MicheL         : 450 | 7275 --> 7448 (+173)
+    B. NetanyaSwoop: 480 | 8927 --> 9100 (+173)
     """
     if not results:
         return "No results"
@@ -539,26 +539,15 @@ def _build_detailed_results_table(results: List[Dict[str, Any]]) -> str:
     lines = []
 
     for result in results:
-        place = result['place']
-        name = result['player_name'][:14]
-        score = result['series']
+        name = result['player_name'][:16]
+        series = result['series']
         old_mmr = int(result['old_mmr'])
         new_mmr = int(result['new_mmr'])
         mmr_change = result['mmr_change']
-        bonus_mmr = result.get('bonus_mmr', 0)
 
-        # Main line: place, name, score, MMR change
-        mmr_display = f"({mmr_change:+d})"
-        if bonus_mmr > 0:
-            mmr_display = f"({mmr_change:+d} with {bonus_mmr:+d} bonus)"
-
-        main_line = f"{place}. {name:14} {score:3} pins → {new_mmr:5.0f} MMR {mmr_display}"
-        lines.append(main_line)
-
-        # Rank change line if applicable
-        rank_change = result.get('rank_change', '')
-        if rank_change:
-            lines.append(f"   {rank_change}")
+        # Format: Name : Pins | OldMMR --> NewMMR (Change)
+        line = f"{name:16}: {series:3} | {old_mmr:5.0f} --> {new_mmr:5.0f} ({mmr_change:+d})"
+        lines.append(line)
 
     return "\n".join(lines)
 
