@@ -277,7 +277,7 @@ class AdminCog(commands.Cog):
                 f"Division: `{division}`\n"
                 f"Rank: `{rank_name}`\n"
                 f"Season: `{active_season.name}`",
-                ephemeral=True
+                ephemeral=False
             )
 
         except IntegrityError as e:
