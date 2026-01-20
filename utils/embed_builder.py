@@ -527,42 +527,38 @@ def _build_status_table(players: List[Dict[str, Any]]) -> str:
 
 def _build_detailed_results_table(results: List[Dict[str, Any]]) -> str:
     """
-    Build detailed ASCII table for results embed.
+    Build clean, modern results table for results embed.
 
     Format:
-    Place | Player       | Score | MMR  | +/-  | Bonus | New  | Rank
-    ------|--------------|-------|------|------|-------|------|------
-    1     | Player1      | 450   | 8000 | +28  | +5    | 8028 | Gold II ⬆️
+    1. Player Name        450 pins → 8016 MMR (+216)
+       Gold II ⬆️
     """
     if not results:
         return "No results"
 
-    # Header
-    lines = [
-        "Place | Player       | Score | MMR  | +/-  | Bonus | New  | Rank",
-        "------|--------------|-------|------|------|-------|------|------"
-    ]
+    lines = []
 
     for result in results:
-        place = str(result['place']).rjust(5)
-        name = result['player_name'][:12].ljust(12)
-        score = str(result['series']).rjust(5)
-        old_mmr = str(int(result['old_mmr'])).rjust(4)
-
-        # Format MMR change with sign
+        place = result['place']
+        name = result['player_name'][:14]
+        score = result['series']
+        old_mmr = int(result['old_mmr'])
+        new_mmr = int(result['new_mmr'])
         mmr_change = result['mmr_change']
-        change_str = f"{mmr_change:+d}".rjust(4)
-
-        # Format bonus
         bonus_mmr = result.get('bonus_mmr', 0)
-        bonus_str = f"{bonus_mmr:+d}".rjust(5) if bonus_mmr != 0 else "    0"
 
-        new_mmr = str(int(result['new_mmr'])).rjust(4)
+        # Main line: place, name, score, MMR change
+        mmr_display = f"({mmr_change:+d})"
+        if bonus_mmr > 0:
+            mmr_display = f"({mmr_change:+d} with {bonus_mmr:+d} bonus)"
 
-        # Rank with arrow if changed
+        main_line = f"{place}. {name:14} {score:3} pins → {new_mmr:5.0f} MMR {mmr_display}"
+        lines.append(main_line)
+
+        # Rank change line if applicable
         rank_change = result.get('rank_change', '')
-
-        lines.append(f"{place} | {name} | {score} | {old_mmr} | {change_str} | {bonus_str} | {new_mmr} | {rank_change}")
+        if rank_change:
+            lines.append(f"   {rank_change}")
 
     return "\n".join(lines)
 
