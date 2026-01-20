@@ -197,12 +197,22 @@ def create_detailed_results_embed(
     bonus_lines = []
     for result in results_data:
         if result.get('bonus_details'):
-            bonus_lines.append(f"**{result['player_name']}**: {', '.join(result['bonus_details'])}")
+            bonus_text = _format_bonus_details(result['bonus_details'])
+            if bonus_text:
+                bonus_lines.append(f"{result['player_name']:16}: {bonus_text}")
 
     if bonus_lines:
         embed.add_field(
             name="🎯 Bonuses Earned",
-            value="\n".join(bonus_lines),
+            value=f"```\n" + "\n".join(bonus_lines) + "\n```",
+            inline=False
+        )
+
+        # Add legend
+        legend = "200+ +50  •  225+ +80  •  250+ +120  •  275+ +180  •  🎳 300 +500"
+        embed.add_field(
+            name="Bonus Legend",
+            value=legend,
             inline=False
         )
 
@@ -601,3 +611,64 @@ def _build_results_table(results: List[Dict[str, Any]]) -> str:
         lines.append(f"{rank} | {name} | {game1} | {game2} | {series} | {change_str} | {new_mmr} | {rank_name}")
 
     return "\n".join(lines)
+
+
+def _format_bonus_details(bonus_details: List[str]) -> str:
+    """
+    Format bonus details into compact notation.
+
+    Input: ["275+ Game: +18 MMR", "225+ Game: +8 MMR"]
+    Output: "+26 (275+ 225+)"
+
+    Input: ["225+ Game: +8 MMR", "225+ Game: +8 MMR"]
+    Output: "+16 (225+ ×2)"
+    """
+    if not bonus_details:
+        return ""
+
+    from collections import Counter
+
+    bonuses = []
+    total_bonus = 0
+
+    for detail in bonus_details:
+        # Parse format: "YYY+ Game: +NN MMR" or "Perfect Game (300): +NN MMR"
+        if "Perfect Game" in detail:
+            bonuses.append("🎳")
+            # Extract the bonus amount
+            amount_str = detail.split("+")[1].split()[0]
+            total_bonus += int(amount_str)
+        elif "275+" in detail:
+            bonuses.append("275+")
+            amount_str = detail.split("+")[1].split()[0]
+            total_bonus += int(amount_str)
+        elif "250+" in detail:
+            bonuses.append("250+")
+            amount_str = detail.split("+")[1].split()[0]
+            total_bonus += int(amount_str)
+        elif "225+" in detail:
+            bonuses.append("225+")
+            amount_str = detail.split("+")[1].split()[0]
+            total_bonus += int(amount_str)
+        elif "200+" in detail:
+            bonuses.append("200+")
+            amount_str = detail.split("+")[1].split()[0]
+            total_bonus += int(amount_str)
+
+    if not bonuses:
+        return ""
+
+    # Count occurrences
+    bonus_counts = Counter(bonuses)
+
+    # Format with multipliers if repeated
+    formatted_bonuses = []
+    for bonus_type in ["200+", "225+", "250+", "275+", "🎳"]:
+        if bonus_type in bonus_counts:
+            count = bonus_counts[bonus_type]
+            if count > 1:
+                formatted_bonuses.append(f"{bonus_type} ×{count}")
+            else:
+                formatted_bonuses.append(bonus_type)
+
+    return f"+{int(total_bonus)} ({' '.join(formatted_bonuses)})"
