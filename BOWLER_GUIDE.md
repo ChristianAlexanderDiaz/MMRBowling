@@ -174,7 +174,6 @@ Once the activation threshold is met, the session is "hot" and ready to finalize
 1. Make sure you're on Discord and have notifications enabled
 2. Know your division (1 or 2)
 3. Be ready to submit immediately after your games
-4. Have a pen/paper handy to track your score frame-by-frame
 
 ### **During Session**
 1. **Check in early** by reacting ✅ to the check-in message
