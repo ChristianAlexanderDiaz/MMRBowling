@@ -12,13 +12,13 @@ load_dotenv()
 
 DATABASE_URL = os.getenv('DATABASE_URL')
 
-if not DATABASE_URL:
-    print("ERROR: DATABASE_URL not found in environment variables")
-    print("Make sure you have a .env file with DATABASE_URL set to your Railway PostgreSQL connection string")
-    exit(1)
-
 def run_migration():
     """Add auto_reveal_notified column to sessions table."""
+    if not DATABASE_URL:
+        print("ERROR: DATABASE_URL not found in environment variables")
+        print("Make sure you have a .env file with DATABASE_URL set to your Railway PostgreSQL connection string")
+        raise SystemExit(1)
+
     conn = psycopg2.connect(DATABASE_URL)
     cursor = conn.cursor()
     
