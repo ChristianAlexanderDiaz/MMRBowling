@@ -200,7 +200,7 @@ class PlayerCog(commands.Cog):
 
                 # Format line: Rank | Name | Division | MMR | Avg | Rank
                 lines.append(
-                    f"{rank:2} | {display_name[:12]:12} | Div {player.division} | "
+                    f"{rank:2} | {display_name[:12]:12} | {player.division} | "
                     f"{player.current_mmr:7.1f} | {season_avg:>6} | {tier_name}"
                 )
 
@@ -222,8 +222,8 @@ class PlayerCog(commands.Cog):
                 chunks.append("\n".join(current_chunk))
 
             # Add header
-            header = "Rk | Name         | Div | MMR     | Avg    | Rank"
-            separator = "-----|--------------|-----|---------|--------|----------"
+            header = "Rk | Name         | D | MMR     | Avg    | Rank"
+            separator = "-----|--------------|---|---------|--------|----------"
 
             # Add chunks as fields
             for i, chunk in enumerate(chunks):

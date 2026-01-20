@@ -35,8 +35,9 @@ class SessionCog(commands.Cog):
         # Start the check-in task
         try:
             self.check_in_task.start()
-        except RuntimeError as e:
-            logger.warning(f"Check-in task already running or failed to start: {e}")
+            logger.info("Check-in task started successfully")
+        except Exception as e:
+            logger.error(f"Failed to start check-in task: {type(e).__name__}: {e}", exc_info=True)
 
     def cog_unload(self):
         """Clean up when cog is unloaded."""
@@ -1602,5 +1603,11 @@ class SessionCog(commands.Cog):
 
 
 async def setup(bot):
-    await bot.add_cog(SessionCog(bot))
-    logger.info("Session cog loaded")
+    try:
+        logger.info("Setting up SessionCog...")
+        cog = SessionCog(bot)
+        await bot.add_cog(cog)
+        logger.info("✅ Session cog loaded successfully")
+    except Exception as e:
+        logger.error(f"❌ Failed to load session cog: {type(e).__name__}: {e}", exc_info=True)
+        raise
