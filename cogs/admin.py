@@ -582,24 +582,6 @@ class AdminCog(commands.Cog):
         finally:
             db.close()
 
-    @app_commands.command(name="correctscore", description="Correct a submitted score")
-    @app_commands.default_permissions(administrator=True)
-    async def correct_score(
-        self,
-        interaction: discord.Interaction,
-        player: discord.Member,
-        game_number: int,
-        new_score: int
-    ):
-        """Correct a previously submitted score with confirmation."""
-        await interaction.response.defer(ephemeral=True)
-
-        # TODO: Implement score correction with confirmation embed
-        await interaction.followup.send(
-            f"Correcting {player.mention}'s Game {game_number} to {new_score}\n*This command is under construction.*",
-            ephemeral=True
-        )
-
     @app_commands.command(name="addtestplayers", description="Add 11 test players for simulation (5 Div1, 6 Div2)")
     @app_commands.default_permissions(administrator=True)
     async def add_test_players(self, interaction: discord.Interaction):
