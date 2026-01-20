@@ -381,21 +381,16 @@ def calculate_rank(mmr: int, rank_tiers: List[Dict[str, Any]]) -> RankTierInfo:
         logger.warning("No rank tiers provided, returning default Unranked")
         return RankTierInfo(name="Unranked", min_mmr=0, color="#000000")
 
-    # Sort tiers by min_mmr in descending order to find highest qualifying tier
     sorted_tiers = sorted(rank_tiers, key=lambda x: x.get('min_mmr', 0), reverse=True)
 
-    # Find the highest tier the player qualifies for
     for tier in sorted_tiers:
         if mmr >= tier.get('min_mmr', 0):
             rank_info = RankTierInfo.from_dict(tier)
             logger.debug(f"MMR {mmr} assigned to rank: {rank_info.name}")
             return rank_info
 
-    # If MMR is below all tiers, return the lowest tier
-    lowest_tier = sorted_tiers[-1]
-    rank_info = RankTierInfo.from_dict(lowest_tier)
-    logger.debug(f"MMR {mmr} below all tiers, assigned to: {rank_info.name}")
-    return rank_info
+    logger.debug(f"MMR {mmr} below all tiers, returning Unranked")
+    return RankTierInfo(name="Unranked", min_mmr=0, color="#000000")
 
 
 def apply_decay(player_mmr: int, unexcused_misses: int, decay_amount: int = 50) -> int:
@@ -489,7 +484,7 @@ def process_session_results(
     # Group players by division
     divisions: Dict[str, List[Dict[str, Any]]] = {}
     for player in players_data:
-        division = player.get('division', 'A')
+        division = str(player.get('division', 1))
         if division not in divisions:
             divisions[division] = []
         divisions[division].append(player)

@@ -175,6 +175,7 @@ class Session(Base):
     is_active = Column(Boolean, default=False, nullable=False, index=True)  # Activated on 3rd Game 1 submission
     is_revealed = Column(Boolean, default=False, nullable=False, index=True)  # Results shown
     is_completed = Column(Boolean, default=False, nullable=False, index=True)  # Session fully processed
+    auto_reveal_notified = Column(Boolean, default=False, nullable=False)  # Whether admins have been notified ready for reveal
 
     event_type = Column(String(50), nullable=False, default='normal')  # 'normal', 'tournament', etc.
     event_multiplier = Column(Float, nullable=False, default=1.0)  # MMR multiplier for special events

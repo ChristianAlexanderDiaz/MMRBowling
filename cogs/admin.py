@@ -694,9 +694,8 @@ class AdminCog(commands.Cog):
 
         db = SessionLocal()
         try:
-            # Find test players (discord_id starts with "10000")
             test_players = db.query(Player).filter(
-                Player.discord_id.like("10000%")
+                Player.username.like("TestPlayer%")
             ).all()
 
             if not test_players:
@@ -708,7 +707,6 @@ class AdminCog(commands.Cog):
 
             removed_names = [p.username for p in test_players]
 
-            # Delete them (cascade will handle related records)
             for player in test_players:
                 db.delete(player)
 
