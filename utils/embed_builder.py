@@ -208,10 +208,10 @@ def create_detailed_results_embed(
             inline=False
         )
 
-        # Add legend
-        legend = "200+ +50  •  225+ +80  •  250+ +120  •  275+ +180  •  🎳 300 +500"
+        # Add legend with explanation of notation
+        legend = "**Notation:** 'e' = elo change, 'b' = bonus MMR\n200+ +5  •  225+ +8  •  250+ +12  •  275+ +18  •  🎳 300 +50"
         embed.add_field(
-            name="Bonus Legend",
+            name="Legend",
             value=legend,
             inline=False
         )
@@ -539,9 +539,13 @@ def _build_detailed_results_table(results: List[Dict[str, Any]]) -> str:
     """
     Build clean MMR change table for results embed.
 
-    Format:
-    MicheL         : 450 | 7275 --> 7448 (+400 elo +27 bonus = +427)
-    B. NetanyaSwoop: 480 | 8927 --> 9100 (+173)
+    Format (compact to fit Discord embed width):
+    MicheL     : 450 | 7275->7448 (+400e +27b = +427)
+    Brooks     : 375 | 8400->8755 (+305e +50b = +355) Platinum->Platinum II⬆
+    NetanyaSw..: 480 | 8927->9100 (+173)
+
+    Uses shorter labels: 'e' for elo, 'b' for bonus, '->' instead of ' --> '
+    Names truncated to 11 chars with '..' if needed. Rank changes inline.
     """
     if not results:
         return "No results"
@@ -549,7 +553,12 @@ def _build_detailed_results_table(results: List[Dict[str, Any]]) -> str:
     lines = []
 
     for result in results:
-        name = result['player_name'][:16]
+        # Truncate name to 11 chars max with ellipsis if needed
+        name = result['player_name']
+        if len(name) > 11:
+            name = name[:9] + ".."
+        name = name.ljust(11)
+
         series = result['series']
         old_mmr = int(result['old_mmr'])
         new_mmr = int(result['new_mmr'])
@@ -557,13 +566,19 @@ def _build_detailed_results_table(results: List[Dict[str, Any]]) -> str:
         elo_change = int(result.get('elo_change', mmr_change))
         bonus_mmr = int(result.get('bonus_mmr', 0))
 
-        # Format breakdown if bonus exists
+        # Format breakdown with shorter notation: 'e' for elo, 'b' for bonus
         if bonus_mmr != 0:
-            change_text = f"({elo_change:+d} elo {bonus_mmr:+d} bonus = {mmr_change:+d})"
+            change_text = f"({elo_change:+d}e {bonus_mmr:+d}b = {mmr_change:+d})"
         else:
             change_text = f"({mmr_change:+d})"
 
-        line = f"{name:16}: {series:3} | {old_mmr:5.0f} --> {new_mmr:5.0f} {change_text}"
+        # Add rank change inline if applicable
+        rank_change_text = ""
+        if result.get('rank_change'):
+            rank_change_text = f" {result['rank_change']}"
+
+        # Use -> instead of --> to save space
+        line = f"{name}: {series:3} | {old_mmr:4.0f}->{new_mmr:4.0f} {change_text}{rank_change_text}"
         lines.append(line)
 
     return "\n".join(lines)

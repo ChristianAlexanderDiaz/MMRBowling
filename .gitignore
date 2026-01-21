@@ -47,3 +47,7 @@ Thumbs.db
 
 # Logs
 *.log
+
+# PlantUML diagrams
+*.puml
+flow_diagrams/
