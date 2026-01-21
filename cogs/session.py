@@ -46,12 +46,17 @@ class SessionCog(commands.Cog):
         """Clean up when cog is unloaded."""
         self.check_in_task.cancel()
 
-    @tasks.loop(time=time(hour=20, minute=30))  # 8:30 PM
+    @tasks.loop(time=time(hour=16, minute=0))  # 4:00 PM
     async def check_in_task(self):
         """
-        Automated task to post check-in embed at 8:30 PM.
-        Posts check-in to all configured channels or creates a session if needed.
+        Automated task to post check-in embed at 4:00 PM on Tuesday and Thursday.
+        Posts check-in to the configured channel only.
         """
+        # Only run on Tuesday (1) and Thursday (3)
+        if date.today().weekday() not in [1, 3]:
+            logger.debug(f"Skipping check-in task - today is {date.today().strftime('%A')}")
+            return
+
         logger.info("Check-in time! Posting check-in embed...")
 
         db = SessionLocal()
@@ -105,48 +110,39 @@ class SessionCog(commands.Cog):
                 division_2_players=div2_data
             )
 
-            # Try to post to each guild the bot is in
-            for guild in self.bot.guilds:
-                # Find a suitable channel (look for general or check-in related channels)
-                target_channel = None
-                for channel in guild.text_channels:
-                    if channel.permissions_for(guild.me).send_messages:
-                        if any(name in channel.name.lower() for name in ['general', 'bowling', 'check-in', 'session']):
-                            target_channel = channel
-                            break
+            # Post to the specific check-in channel
+            target_channel_id = 1289269158567219301
+            target_channel = self.bot.get_channel(target_channel_id)
 
-                # Fallback to first available channel
-                if not target_channel:
-                    for channel in guild.text_channels:
-                        if channel.permissions_for(guild.me).send_messages:
-                            target_channel = channel
-                            break
+            if not target_channel:
+                logger.error(f"Check-in channel {target_channel_id} not found")
+                return
 
-                if not target_channel:
-                    logger.warning(f"No suitable channel found in guild {guild.name}")
-                    continue
+            guild = target_channel.guild
+            if not target_channel.permissions_for(guild.me).send_messages:
+                logger.error(f"Missing permissions to post in check-in channel {target_channel.name}")
+                return
 
-                try:
-                    message = await target_channel.send(embed=embed)
-                    await message.add_reaction("✅")
-                    await message.add_reaction("❌")
-                    await message.pin()
+            try:
+                message = await target_channel.send(embed=embed)
+                await message.add_reaction("✅")
+                await message.add_reaction("❌")
+                await message.pin()
 
-                    # Store message ID and channel ID
-                    new_session.check_in_message_id = str(message.id)
-                    new_session.check_in_channel_id = str(target_channel.id)
-                    db.commit()
+                # Store message ID and channel ID
+                new_session.check_in_message_id = str(message.id)
+                new_session.check_in_channel_id = str(target_channel.id)
+                db.commit()
 
-                    logger.info(
-                        f"Posted automated check-in (message ID: {message.id}) "
-                        f"in {guild.name} channel {target_channel.name}"
-                    )
-                    break  # Only post to first guild
+                logger.info(
+                    f"Posted automated check-in (message ID: {message.id}) "
+                    f"in {guild.name} channel {target_channel.name}"
+                )
 
-                except discord.Forbidden:
-                    logger.error(f"Missing permissions to post in {target_channel.name}")
-                except discord.HTTPException as e:
-                    logger.error(f"Failed to post check-in: {e}")
+            except discord.Forbidden:
+                logger.error(f"Missing permissions to post in {target_channel.name}")
+            except discord.HTTPException as e:
+                logger.error(f"Failed to post check-in: {e}")
 
         except Exception as e:
             logger.error(f"Error in automated check-in task: {e}")
