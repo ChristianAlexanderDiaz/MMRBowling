@@ -5,7 +5,7 @@ import logging
 from datetime import datetime, date
 from sqlalchemy.exc import IntegrityError
 from database.connection import SessionLocal
-from database.models import Season, Player, PlayerSeasonStats, Config, RankTier, Session, SessionCheckIn, Score, BonusConfig
+from database.models import Season, Player, PlayerSeasonStats, Config, RankTier, Session, SessionCheckIn, Score, BonusConfig, PromotionHistory
 
 logger = logging.getLogger('MMRBowling.Admin')
 
@@ -905,10 +905,10 @@ class AdminCog(commands.Cog):
         finally:
             db.close()
 
-    @app_commands.command(name="clearall", description="🚨 Clear ALL sessions and scores (TESTING ONLY)")
+    @app_commands.command(name="clearall", description="🚨 Clear ALL sessions, scores, AND players (TESTING ONLY)")
     @app_commands.default_permissions(administrator=True)
     async def clear_all(self, interaction: discord.Interaction):
-        """Clear all sessions and scores. WARNING: This cannot be undone!"""
+        """Clear all sessions, scores, and players. WARNING: This cannot be undone!"""
         await interaction.response.defer(ephemeral=True)
 
         db = SessionLocal()
@@ -917,39 +917,50 @@ class AdminCog(commands.Cog):
             session_count = db.query(Session).count()
             score_count = db.query(Score).count()
             checkin_count = db.query(SessionCheckIn).count()
+            player_count = db.query(Player).count()
+            season_stats_count = db.query(PlayerSeasonStats).count()
+            promotion_count = db.query(PromotionHistory).count()
 
-            if session_count == 0:
+            if session_count == 0 and player_count == 0:
                 await interaction.followup.send(
-                    "No sessions to clear.",
+                    "No data to clear.",
                     ephemeral=True
                 )
                 return
 
             # Delete all sessions (cascade will delete scores and check-ins)
             db.query(Session).delete()
+
+            # Delete all players (cascade will delete season_stats and promotion_history)
+            db.query(Player).delete()
+
             db.commit()
 
             logger.warning(
                 f"ALL DATA CLEARED by {interaction.user.name}: "
-                f"{session_count} sessions, {score_count} scores, {checkin_count} check-ins"
+                f"{session_count} sessions, {score_count} scores, {checkin_count} check-ins, "
+                f"{player_count} players, {season_stats_count} season stats, {promotion_count} promotions"
             )
 
             await interaction.followup.send(
-                f"**🚨 All Data Cleared!**\n\n"
+                f"**🚨 ALL DATA CLEARED!**\n\n"
                 f"Deleted:\n"
                 f"- {session_count} sessions\n"
                 f"- {score_count} scores\n"
-                f"- {checkin_count} check-ins\n\n"
-                f"⚠️ Player data and season stats were preserved.\n"
-                f"You can now start fresh with `/startcheckin`.",
+                f"- {checkin_count} check-ins\n"
+                f"- {player_count} players\n"
+                f"- {season_stats_count} season stats\n"
+                f"- {promotion_count} promotion records\n\n"
+                f"⚠️ Seasons, rank tiers, config, and bonus settings were preserved.\n"
+                f"You can now start fresh by adding players with `/addplayer` or `/addtestplayers`.",
                 ephemeral=True
             )
 
         except Exception as e:
             db.rollback()
-            logger.error(f"Error clearing sessions: {e}")
+            logger.error(f"Error clearing all data: {e}")
             await interaction.followup.send(
-                f"Error clearing sessions: {str(e)}",
+                f"Error clearing all data: {str(e)}",
                 ephemeral=True
             )
         finally:

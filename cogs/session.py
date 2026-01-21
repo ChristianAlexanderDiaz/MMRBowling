@@ -857,12 +857,20 @@ class SessionCog(commands.Cog):
                         db
                     )
 
-                    if result.rank_changed:
-                        new_tier = db.query(RankTier).filter(
-                            RankTier.rank_name == result.new_rank.name
-                        ).first()
-                        if new_tier:
-                            player.rank_tier_id = new_tier.id
+                    # Update rank tier in database
+                    new_tier = db.query(RankTier).filter(
+                        RankTier.rank_name == result.new_rank.name
+                    ).first()
+                    if new_tier:
+                        player.rank_tier_id = new_tier.id
+
+                    # Auto-assign Discord role if rank changed
+                    if result.rank_changed and new_tier:
+                        await self._assign_rank_role(
+                            player,
+                            new_tier,
+                            interaction.guild
+                        )
 
                     logger.info(
                         f"Updated {player.username}: "
@@ -906,9 +914,9 @@ class SessionCog(commands.Cog):
                 rank_change = None
                 if result.rank_changed:
                     if result.new_rank.min_mmr > result.old_rank.min_mmr:
-                        rank_change = f"{result.new_rank.name} ⬆️"
+                        rank_change = f"{result.old_rank.name} → {result.new_rank.name} ⬆️"
                     else:
-                        rank_change = f"{result.new_rank.name} ⬇️"
+                        rank_change = f"{result.old_rank.name} → {result.new_rank.name} ⬇️"
 
                 results_data.append({
                     'player_name': display_name,
@@ -1202,6 +1210,104 @@ class SessionCog(commands.Cog):
 
         except Exception as e:
             logger.error(f"Error notifying auto-reveal ready: {e}")
+
+    async def _assign_rank_role(
+        self,
+        player: Player,
+        rank_tier: RankTier,
+        guild: discord.Guild
+    ) -> None:
+        """
+        Assign Discord role to player based on their rank tier.
+
+        This method removes any existing rank roles and assigns the new one.
+        Only works if the rank tier has a discord_role_id configured.
+
+        Args:
+            player: Player object from database
+            rank_tier: RankTier object with discord_role_id
+            guild: Discord guild to assign role in
+        """
+        try:
+            # Check if rank tier has a role configured
+            if not rank_tier.discord_role_id:
+                logger.debug(
+                    f"Rank tier '{rank_tier.rank_name}' has no discord_role_id configured, "
+                    f"skipping role assignment for player {player.username}"
+                )
+                return
+
+            # Get the Discord member
+            try:
+                member = await guild.fetch_member(int(player.discord_id))
+            except (discord.NotFound, discord.HTTPException) as e:
+                logger.warning(
+                    f"Could not find member {player.discord_id} in guild {guild.name}: {e}"
+                )
+                return
+
+            # Get the role to assign
+            new_role = guild.get_role(int(rank_tier.discord_role_id))
+            if not new_role:
+                logger.warning(
+                    f"Role ID {rank_tier.discord_role_id} not found in guild {guild.name} "
+                    f"for rank {rank_tier.rank_name}"
+                )
+                return
+
+            # Get all rank tier role IDs from database (to remove old rank roles)
+            from database import SessionLocal as DBSessionLocal
+            temp_db = DBSessionLocal()
+            try:
+                all_rank_tiers = temp_db.query(RankTier).filter(
+                    RankTier.discord_role_id.isnot(None)
+                ).all()
+                rank_role_ids = {
+                    int(tier.discord_role_id)
+                    for tier in all_rank_tiers
+                    if tier.discord_role_id
+                }
+            finally:
+                temp_db.close()
+
+            # Remove any existing rank roles from the player
+            roles_to_remove = [
+                role for role in member.roles
+                if role.id in rank_role_ids and role.id != new_role.id
+            ]
+
+            if roles_to_remove:
+                await member.remove_roles(
+                    *roles_to_remove,
+                    reason=f"Rank changed to {rank_tier.rank_name}"
+                )
+                logger.info(
+                    f"Removed old rank roles from {player.username}: "
+                    f"{[role.name for role in roles_to_remove]}"
+                )
+
+            # Add the new role if they don't already have it
+            if new_role not in member.roles:
+                await member.add_roles(
+                    new_role,
+                    reason=f"Promoted to {rank_tier.rank_name} (MMR: {player.current_mmr:.0f})"
+                )
+                logger.info(
+                    f"Assigned role '{new_role.name}' to {player.username} "
+                    f"(rank: {rank_tier.rank_name}, MMR: {player.current_mmr:.0f})"
+                )
+            else:
+                logger.debug(
+                    f"Player {player.username} already has role '{new_role.name}'"
+                )
+
+        except discord.Forbidden:
+            logger.error(
+                f"Missing permissions to manage roles for {player.username}. "
+                f"Ensure bot has 'Manage Roles' permission and bot role is higher than rank roles."
+            )
+        except Exception as e:
+            logger.error(f"Error assigning rank role to {player.username}: {e}", exc_info=True)
 
     def _check_auto_reveal(self, session_id: int, db: DBSession) -> bool:
         """Check if all checked-in players have submitted both games."""
