@@ -1119,6 +1119,156 @@ class AdminCog(commands.Cog):
         finally:
             db.close()
 
+    async def rank_name_autocomplete(
+        self,
+        interaction: discord.Interaction,
+        current: str
+    ) -> list[app_commands.Choice[str]]:
+        """Autocomplete for rank names."""
+        db = SessionLocal()
+        try:
+            rank_tiers = db.query(RankTier).order_by(RankTier.order.asc()).all()
+
+            # Filter ranks based on current input
+            filtered_ranks = [
+                tier.rank_name for tier in rank_tiers
+                if current.lower() in tier.rank_name.lower()
+            ]
+
+            # Return up to 25 choices (Discord limit)
+            return [
+                app_commands.Choice(name=rank_name, value=rank_name)
+                for rank_name in filtered_ranks[:25]
+            ]
+        finally:
+            db.close()
+
+    @app_commands.command(name="setrankrole", description="Set Discord role for a rank tier")
+    @app_commands.describe(
+        rank_name="The rank tier name (e.g., 'Platinum II')",
+        role="The Discord role to assign for this rank (mention/ping the role)"
+    )
+    @app_commands.autocomplete(rank_name=rank_name_autocomplete)
+    @app_commands.default_permissions(administrator=True)
+    async def set_rank_role(
+        self,
+        interaction: discord.Interaction,
+        rank_name: str,
+        role: discord.Role
+    ):
+        """Set the Discord role ID for a specific rank tier."""
+        await interaction.response.defer(ephemeral=True)
+
+        db = SessionLocal()
+        try:
+            # Find the rank tier
+            rank_tier = db.query(RankTier).filter(
+                RankTier.rank_name == rank_name
+            ).first()
+
+            if not rank_tier:
+                await interaction.followup.send(
+                    f"❌ Rank tier '{rank_name}' not found.\n\n"
+                    f"Use `/listranks` to see available ranks.",
+                    ephemeral=True
+                )
+                return
+
+            # Update the discord_role_id
+            rank_tier.discord_role_id = str(role.id)
+            db.commit()
+
+            logger.info(
+                f"Set Discord role '{role.name}' (ID: {role.id}) "
+                f"for rank tier '{rank_name}' (ID: {rank_tier.id})"
+            )
+
+            await interaction.followup.send(
+                f"✅ **Role configured successfully!**\n\n"
+                f"**Rank:** {rank_name}\n"
+                f"**Discord Role:** {role.mention}\n"
+                f"**Role ID:** `{role.id}`\n\n"
+                f"Players who reach this rank will automatically receive this role on session reveal.",
+                ephemeral=True
+            )
+
+        except Exception as e:
+            db.rollback()
+            logger.error(f"Error setting rank role: {e}")
+            await interaction.followup.send(
+                f"❌ Error setting rank role: {str(e)}",
+                ephemeral=True
+            )
+        finally:
+            db.close()
+
+    @app_commands.command(name="listranks", description="List all rank tiers and their Discord roles")
+    @app_commands.default_permissions(administrator=True)
+    async def list_ranks(
+        self,
+        interaction: discord.Interaction
+    ):
+        """List all rank tiers with their MMR thresholds and Discord role configuration."""
+        await interaction.response.defer(ephemeral=True)
+
+        db = SessionLocal()
+        try:
+            # Get all rank tiers ordered by MMR threshold
+            rank_tiers = db.query(RankTier).order_by(RankTier.order.asc()).all()
+
+            if not rank_tiers:
+                await interaction.followup.send(
+                    "❌ No rank tiers found. Use `/seed` to initialize rank tiers.",
+                    ephemeral=True
+                )
+                return
+
+            # Build the embed
+            embed = discord.Embed(
+                title="🏆 Rank Tiers Configuration",
+                description="Use `/setrankrole` to configure Discord roles for auto-assignment",
+                color=discord.Color.blue()
+            )
+
+            # Group ranks into chunks for better readability
+            rank_list = []
+            for tier in rank_tiers:
+                role_info = "❌ Not configured"
+                if tier.discord_role_id:
+                    role = interaction.guild.get_role(int(tier.discord_role_id))
+                    if role:
+                        role_info = f"✅ {role.mention}"
+                    else:
+                        role_info = f"⚠️ Role not found (ID: {tier.discord_role_id})"
+
+                rank_list.append(
+                    f"**{tier.rank_name}** (MMR {tier.mmr_threshold}+)\n"
+                    f"└ Role: {role_info}"
+                )
+
+            # Add ranks to embed in chunks to avoid hitting field limits
+            chunk_size = 5
+            for i in range(0, len(rank_list), chunk_size):
+                chunk = rank_list[i:i+chunk_size]
+                embed.add_field(
+                    name="\u200b",  # Zero-width space for clean formatting
+                    value="\n\n".join(chunk),
+                    inline=False
+                )
+
+            embed.set_footer(text="Roles are auto-assigned when players are promoted/demoted during /reveal")
+
+            await interaction.followup.send(embed=embed, ephemeral=True)
+
+        except Exception as e:
+            logger.error(f"Error listing ranks: {e}")
+            await interaction.followup.send(
+                f"❌ Error listing ranks: {str(e)}",
+                ephemeral=True
+            )
+        finally:
+            db.close()
+
 
 async def setup(bot):
     await bot.add_cog(AdminCog(bot))
