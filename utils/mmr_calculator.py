@@ -393,17 +393,23 @@ def calculate_rank(mmr: int, rank_tiers: List[Dict[str, Any]]) -> RankTierInfo:
     return RankTierInfo(name="Unranked", min_mmr=0, color="#000000")
 
 
-def apply_decay(player_mmr: int, unexcused_misses: int, decay_amount: int = 50) -> int:
+def apply_decay(
+    player_mmr: int,
+    unexcused_misses: int,
+    decay_amount: int = 200,
+    decay_threshold: int = 4
+) -> int:
     """
-    Apply MMR decay after 4 unexcused misses.
+    Apply MMR decay after reaching the unexcused miss threshold.
 
-    Decay is applied starting from the 5th consecutive unexcused miss.
+    Decay is applied starting from the (threshold + 1)th consecutive unexcused miss.
     Each additional miss applies the decay amount.
 
     Args:
         player_mmr: Current MMR
         unexcused_misses: Number of consecutive unexcused misses
-        decay_amount: MMR to subtract per miss after threshold (default 50)
+        decay_amount: MMR to subtract per miss after threshold (default 200)
+        decay_threshold: Grace period before decay starts (default 4)
 
     Returns:
         New MMR after decay
@@ -413,28 +419,107 @@ def apply_decay(player_mmr: int, unexcused_misses: int, decay_amount: int = 50) 
         8000
         >>> apply_decay(8000, 4)  # At threshold, no decay yet
         8000
-        >>> apply_decay(8000, 5)  # First decay
-        7950
+        >>> apply_decay(8000, 5)  # First decay (default 200)
+        7800
         >>> apply_decay(8000, 6)  # Second decay
-        7900
+        7600
+        >>> apply_decay(8000, 5, decay_amount=200, decay_threshold=4)
+        7800
     """
-    DECAY_THRESHOLD = 4
-
-    if unexcused_misses <= DECAY_THRESHOLD:
+    if unexcused_misses <= decay_threshold:
         return player_mmr
 
     # Calculate number of decay applications
-    decay_count = unexcused_misses - DECAY_THRESHOLD
+    decay_count = unexcused_misses - decay_threshold
     total_decay = decay_count * decay_amount
     new_mmr = player_mmr - total_decay
 
     logger.info(
         f"Decay applied: {unexcused_misses} misses "
-        f"(threshold: {DECAY_THRESHOLD}) -> "
+        f"(threshold: {decay_threshold}) -> "
         f"MMR {player_mmr} → {new_mmr} (-{total_decay})"
     )
 
     return new_mmr
+
+
+def update_attendance_and_apply_decay(
+    player_id: int,
+    attended: bool,
+    current_mmr: int,
+    current_unexcused_misses: int,
+    decay_amount: int = 200,
+    decay_threshold: int = 4
+) -> Tuple[int, int, int]:
+    """
+    Update attendance tracking and apply decay using the Slow Forgiveness model.
+
+    Model: Option 1C - Slow Forgiveness
+    - When player attends: unexcused_misses = max(0, unexcused_misses - 2)
+    - When player misses: unexcused_misses++, apply decay if over threshold
+
+    Args:
+        player_id: Player identifier for logging
+        attended: True if player submitted scores, False if missed
+        current_mmr: Player's current MMR before decay
+        current_unexcused_misses: Player's current unexcused miss count
+        decay_amount: MMR to subtract per miss after threshold (default 200)
+        decay_threshold: Grace period before decay starts (default 4)
+
+    Returns:
+        Tuple of (new_mmr, new_unexcused_misses, mmr_decay_applied)
+
+    Example:
+        >>> # Player attends with 3 misses - reduces to 1
+        >>> update_attendance_and_apply_decay(1, True, 8000, 3)
+        (8000, 1, 0)
+
+        >>> # Player attends with 1 miss - reduces to 0
+        >>> update_attendance_and_apply_decay(1, True, 8000, 1)
+        (8000, 0, 0)
+
+        >>> # Player misses with 4 misses - goes to 5, applies -200 decay
+        >>> update_attendance_and_apply_decay(1, False, 8000, 4)
+        (7800, 5, -200)
+
+        >>> # Player misses with 3 misses - goes to 4, no decay yet
+        >>> update_attendance_and_apply_decay(1, False, 8000, 3)
+        (8000, 4, 0)
+    """
+    new_unexcused_misses = current_unexcused_misses
+    new_mmr = current_mmr
+    decay_applied = 0
+
+    if attended:
+        # Slow forgiveness: reduce by 2, minimum 0
+        new_unexcused_misses = max(0, current_unexcused_misses - 2)
+        logger.info(
+            f"Player {player_id} attended session: "
+            f"unexcused_misses {current_unexcused_misses} → {new_unexcused_misses} (-2)"
+        )
+    else:
+        # Increment miss counter
+        new_unexcused_misses = current_unexcused_misses + 1
+
+        # Apply decay if over threshold
+        if new_unexcused_misses > decay_threshold:
+            decay_count = new_unexcused_misses - decay_threshold
+            decay_applied = -(decay_count * decay_amount)
+            new_mmr = current_mmr + decay_applied  # decay_applied is negative
+
+            logger.warning(
+                f"Player {player_id} missed session: "
+                f"unexcused_misses {current_unexcused_misses} → {new_unexcused_misses}, "
+                f"MMR {current_mmr} → {new_mmr} ({decay_applied} decay)"
+            )
+        else:
+            logger.info(
+                f"Player {player_id} missed session: "
+                f"unexcused_misses {current_unexcused_misses} → {new_unexcused_misses} "
+                f"(within threshold, no decay)"
+            )
+
+    return new_mmr, new_unexcused_misses, decay_applied
 
 
 def process_session_results(

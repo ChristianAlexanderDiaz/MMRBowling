@@ -1031,7 +1031,7 @@ class AdminCog(commands.Cog):
             # === SEED CONFIG ===
             configs = [
                 {"key": "k_factor", "value": "100", "value_type": "int", "description": "K-factor for Elo calculations"},
-                {"key": "decay_amount", "value": "50", "value_type": "int", "description": "MMR decay per miss after threshold"},
+                {"key": "decay_amount", "value": "200", "value_type": "int", "description": "MMR decay per miss after threshold"},
                 {"key": "decay_threshold", "value": "4", "value_type": "int", "description": "Unexcused misses before decay starts"},
                 {"key": "session_activation_threshold", "value": "3", "value_type": "int", "description": "Number of Game 1 submissions needed to activate session"},
             ]

@@ -11,7 +11,9 @@ from database import (
     SessionLocal, Player, Score, Season, Session, SessionCheckIn,
     PlayerSeasonStats, Config, RankTier, BonusConfig as DBBonusConfig
 )
-from utils.mmr_calculator import process_session_results, BonusConfig
+from utils.mmr_calculator import (
+    process_session_results, BonusConfig, apply_decay, update_attendance_and_apply_decay
+)
 from utils.embed_builder import create_checkin_embed, create_status_embed, create_detailed_results_embed
 
 logger = logging.getLogger('MMRBowling.Session')
@@ -805,6 +807,8 @@ class SessionCog(commands.Cog):
 
             # Get configuration
             k_factor = self._get_config_value(db, 'k_factor', 50, int)
+            decay_amount = self._get_config_value(db, 'decay_amount', 200, int)
+            decay_threshold = self._get_config_value(db, 'decay_threshold', 4, int)
 
             # Get bonus configuration
             bonus_config = self._get_bonus_config(db)
@@ -823,6 +827,15 @@ class SessionCog(commands.Cog):
                 k_factor,
                 bonus_config,
                 rank_tiers
+            )
+
+            # Track which players submitted scores (attended)
+            # This will be used after MMR updates to apply decay correctly
+            players_who_submitted = {pd['player_id'] for pd in players_data}
+
+            logger.info(
+                f"Processing attendance for session {session.id}: "
+                f"{len(players_who_submitted)} submitted, {len(check_ins)} checked in"
             )
 
             try:
@@ -869,6 +882,72 @@ class SessionCog(commands.Cog):
                         f"{old_mmr:.1f} -> {result.new_mmr:.1f} "
                         f"({result.mmr_change:+.1f})"
                     )
+
+                # Apply decay and attendance updates to all checked-in players
+                # Process AFTER session MMR updates
+                decay_info = []  # Track players who received decay for results display
+
+                for check_in in check_ins:
+                    player = db.query(Player).get(check_in.player_id)
+                    if not player:
+                        continue
+
+                    attended = check_in.player_id in players_who_submitted
+                    old_misses = player.unexcused_misses
+                    mmr_after_session = player.current_mmr  # MMR after session results
+
+                    # Update attendance and calculate decay
+                    new_mmr, new_misses, decay_applied = update_attendance_and_apply_decay(
+                        player_id=player.id,
+                        attended=attended,
+                        current_mmr=mmr_after_session,
+                        current_unexcused_misses=old_misses,
+                        decay_amount=decay_amount,
+                        decay_threshold=decay_threshold
+                    )
+
+                    # Apply attendance tracking
+                    player.unexcused_misses = new_misses
+
+                    # Apply decay to MMR if needed
+                    if decay_applied != 0:
+                        player.current_mmr = new_mmr
+
+                        # Recalculate rank after decay
+                        from utils.mmr_calculator import calculate_rank
+                        new_rank = calculate_rank(player.current_mmr, rank_tiers)
+                        new_tier = db.query(RankTier).filter(
+                            RankTier.rank_name == new_rank.name
+                        ).first()
+                        if new_tier:
+                            player.rank_tier_id = new_tier.id
+
+                        # Get display name for decay info
+                        guild = interaction.guild if interaction else None
+                        if guild:
+                            member = guild.get_member(int(player.discord_id))
+                            display_name = member.display_name if member else player.username
+                        else:
+                            display_name = player.username
+
+                        decay_info.append({
+                            'player_name': display_name,
+                            'mmr_before_decay': mmr_after_session,
+                            'mmr_after_decay': new_mmr,
+                            'decay_amount': decay_applied,
+                            'unexcused_misses': new_misses
+                        })
+
+                        logger.warning(
+                            f"Decay applied to {player.username}: "
+                            f"MMR {mmr_after_session:.1f} -> {new_mmr:.1f} ({decay_applied}), "
+                            f"misses {old_misses} -> {new_misses}"
+                        )
+                    else:
+                        logger.info(
+                            f"Attendance updated for {player.username}: "
+                            f"misses {old_misses} -> {new_misses}"
+                        )
 
                 session.is_revealed = True
                 session.revealed_at = datetime.now()
@@ -937,7 +1016,8 @@ class SessionCog(commands.Cog):
                     'session_id': session.id,
                     'session_date': session.session_date,
                     'k_factor': k_factor
-                }
+                },
+                decay_info=decay_info if decay_info else None
             )
 
             # Post results embed to the channel
