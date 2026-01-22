@@ -180,21 +180,26 @@ class SessionCog(commands.Cog):
 
         # Find next Tuesday (1) or Thursday (3)
         current_weekday = current_time.weekday()
-        current_hour = current_time.hour
-        current_minute = current_time.minute
+
+        # Build today's cutoff datetime at 4:00 PM EST
+        cutoff_today = datetime.combine(
+            current_time.date(),
+            time(hour=16, minute=0),
+            tzinfo=est_tz
+        )
 
         # Days until next check-in
         if current_weekday < 1:  # Monday (0)
             days_until_next = 1 - current_weekday
         elif current_weekday == 1:  # Tuesday
-            if current_hour < 16 or (current_hour == 16 and current_minute == 0):
+            if current_time < cutoff_today:
                 days_until_next = 0  # Today
             else:
                 days_until_next = 2  # Thursday
         elif current_weekday < 3:  # Wednesday (2)
             days_until_next = 3 - current_weekday
         elif current_weekday == 3:  # Thursday
-            if current_hour < 16 or (current_hour == 16 and current_minute == 0):
+            if current_time < cutoff_today:
                 days_until_next = 0  # Today
             else:
                 days_until_next = 5  # Next Tuesday
