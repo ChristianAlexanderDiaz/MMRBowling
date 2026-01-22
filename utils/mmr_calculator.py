@@ -501,10 +501,15 @@ def update_attendance_and_apply_decay(
         # Increment miss counter
         new_unexcused_misses = current_unexcused_misses + 1
 
-        # Apply decay if over threshold
+        # Apply decay if over threshold (only incremental decay)
         if new_unexcused_misses > decay_threshold:
-            decay_count = new_unexcused_misses - decay_threshold
-            decay_applied = -(decay_count * decay_amount)
+            # Calculate only the incremental misses over threshold
+            previous_over_threshold = max(0, current_unexcused_misses - decay_threshold)
+            new_over_threshold = new_unexcused_misses - decay_threshold
+            delta_over_threshold = new_over_threshold - previous_over_threshold
+
+            # Apply only the incremental decay
+            decay_applied = -(delta_over_threshold * decay_amount)
             new_mmr = current_mmr + decay_applied  # decay_applied is negative
 
             logger.warning(

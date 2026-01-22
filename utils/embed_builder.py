@@ -240,7 +240,7 @@ def create_detailed_results_embed(
 
         embed.add_field(
             name="⚠️ MMR Decay Applied",
-            value=f"```\n" + "\n".join(decay_lines) + "\n```",
+            value="```\n" + "\n".join(decay_lines) + "\n```",
             inline=False
         )
 

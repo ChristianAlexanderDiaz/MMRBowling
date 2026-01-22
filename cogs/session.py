@@ -2,6 +2,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 from datetime import datetime, time, date
+from zoneinfo import ZoneInfo
 import logging
 import asyncio
 from typing import Optional, Dict, Any, List
@@ -46,15 +47,17 @@ class SessionCog(commands.Cog):
         """Clean up when cog is unloaded."""
         self.check_in_task.cancel()
 
-    @tasks.loop(time=time(hour=16, minute=0))  # 4:00 PM
+    @tasks.loop(time=time(hour=16, minute=0, tzinfo=ZoneInfo("America/New_York")))  # 4:00 PM EST
     async def check_in_task(self):
         """
-        Automated task to post check-in embed at 4:00 PM on Tuesday and Thursday.
+        Automated task to post check-in embed at 4:00 PM EST on Tuesday and Thursday.
         Posts check-in to the configured channel only.
         """
-        # Only run on Tuesday (1) and Thursday (3)
-        if date.today().weekday() not in [1, 3]:
-            logger.debug(f"Skipping check-in task - today is {date.today().strftime('%A')}")
+        # Only run on Tuesday (1) and Thursday (3) using EST timezone
+        est_tz = ZoneInfo("America/New_York")
+        current_time = datetime.now(est_tz)
+        if current_time.weekday() not in [1, 3]:
+            logger.debug(f"Skipping check-in task - today is {current_time.strftime('%A')}")
             return
 
         logger.info("Check-in time! Posting check-in embed...")
