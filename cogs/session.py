@@ -1,7 +1,7 @@
 import discord
 from discord import app_commands
 from discord.ext import commands, tasks
-from datetime import datetime, time, date
+from datetime import datetime, time, date, timedelta
 from zoneinfo import ZoneInfo
 import logging
 import asyncio
@@ -53,14 +53,21 @@ class SessionCog(commands.Cog):
         Automated task to post check-in embed at 4:00 PM EST on Tuesday and Thursday.
         Posts check-in to the configured channel only.
         """
-        # Only run on Tuesday (1) and Thursday (3) using EST timezone
-        est_tz = ZoneInfo("America/New_York")
-        current_time = datetime.now(est_tz)
-        if current_time.weekday() not in [1, 3]:
-            logger.debug(f"Skipping check-in task - today is {current_time.strftime('%A')}")
-            return
+        try:
+            # Only run on Tuesday (1) and Thursday (3) using EST timezone
+            est_tz = ZoneInfo("America/New_York")
+            current_time = datetime.now(est_tz)
 
-        logger.info("Check-in time! Posting check-in embed...")
+            logger.info(f"Check-in task fired at {current_time.strftime('%Y-%m-%d %H:%M:%S %Z')} - Day: {current_time.strftime('%A')} ({current_time.weekday()})")
+
+            if current_time.weekday() not in [1, 3]:
+                logger.info(f"Skipping check-in task - today is {current_time.strftime('%A')}, not Tuesday or Thursday")
+                return
+
+            logger.info("Check-in time! Posting check-in embed...")
+        except Exception as e:
+            logger.error(f"Error in check-in task pre-check: {e}", exc_info=True)
+            return
 
         db = SessionLocal()
         try:
@@ -148,9 +155,145 @@ class SessionCog(commands.Cog):
                 logger.error(f"Failed to post check-in: {e}")
 
         except Exception as e:
-            logger.error(f"Error in automated check-in task: {e}")
+            logger.error(f"Error in automated check-in task: {e}", exc_info=True)
         finally:
             db.close()
+
+    @check_in_task.before_loop
+    async def before_check_in_task(self):
+        """Wait for the bot to be ready before starting the check-in task."""
+        await self.bot.wait_until_ready()
+        est_tz = ZoneInfo("America/New_York")
+        current_time = datetime.now(est_tz)
+        logger.info(f"Check-in task loop ready. Current time: {current_time.strftime('%Y-%m-%d %H:%M:%S %Z')}. Next run at 4:00 PM EST on Tuesday/Thursday.")
+
+    @app_commands.command(name="nextcheckin", description="Check when the next automated check-in will occur")
+    async def next_checkin(self, interaction: discord.Interaction):
+        """
+        Show when the next automated check-in will occur.
+        Displays the next Tuesday or Thursday at 4:00 PM EST.
+        """
+        await interaction.response.defer(ephemeral=True)
+
+        est_tz = ZoneInfo("America/New_York")
+        current_time = datetime.now(est_tz)
+
+        # Find next Tuesday (1) or Thursday (3)
+        current_weekday = current_time.weekday()
+
+        # Build today's cutoff datetime at 4:00 PM EST
+        cutoff_today = datetime.combine(
+            current_time.date(),
+            time(hour=16, minute=0),
+            tzinfo=est_tz
+        )
+
+        # Days until next check-in
+        if current_weekday < 1:  # Monday (0)
+            days_until_next = 1 - current_weekday
+        elif current_weekday == 1:  # Tuesday
+            if current_time < cutoff_today:
+                days_until_next = 0  # Today
+            else:
+                days_until_next = 2  # Thursday
+        elif current_weekday < 3:  # Wednesday (2)
+            days_until_next = 3 - current_weekday
+        elif current_weekday == 3:  # Thursday
+            if current_time < cutoff_today:
+                days_until_next = 0  # Today
+            else:
+                days_until_next = 5  # Next Tuesday
+        else:  # Friday (4), Saturday (5), Sunday (6)
+            days_until_next = (7 - current_weekday) + 1  # Next Tuesday
+
+        next_checkin_date = current_time.date() + timedelta(days=days_until_next)
+        next_checkin_datetime = datetime.combine(
+            next_checkin_date,
+            time(hour=16, minute=0),
+            tzinfo=est_tz
+        )
+
+        # Calculate time difference
+        time_diff = next_checkin_datetime - current_time
+        hours = int(time_diff.total_seconds() // 3600)
+        minutes = int((time_diff.total_seconds() % 3600) // 60)
+
+        embed = discord.Embed(
+            title="⏰ Next Automated Check-In",
+            color=discord.Color.blue(),
+            timestamp=datetime.now()
+        )
+
+        embed.add_field(
+            name="Next Check-In",
+            value=f"{next_checkin_datetime.strftime('%A, %B %d, %Y at %I:%M %p %Z')}",
+            inline=False
+        )
+
+        embed.add_field(
+            name="Time Until Check-In",
+            value=f"{hours} hours and {minutes} minutes",
+            inline=False
+        )
+
+        embed.add_field(
+            name="Current Time",
+            value=f"{current_time.strftime('%A, %B %d, %Y at %I:%M %p %Z')}",
+            inline=False
+        )
+
+        embed.set_footer(text="Check-ins occur every Tuesday and Thursday at 4:00 PM EST")
+
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+    @app_commands.command(name="checktask", description="Check the status of the automated check-in task")
+    @app_commands.default_permissions(administrator=True)
+    async def check_task(self, interaction: discord.Interaction):
+        """
+        Debug command to check if the automated check-in task is running.
+        """
+        await interaction.response.defer(ephemeral=True)
+
+        est_tz = ZoneInfo("America/New_York")
+        current_time = datetime.now(est_tz)
+
+        task_status = "✅ Running" if self.check_in_task.is_running() else "❌ Not Running"
+        next_iteration = self.check_in_task.next_iteration
+
+        embed = discord.Embed(
+            title="🔍 Check-In Task Status",
+            color=discord.Color.green() if self.check_in_task.is_running() else discord.Color.red(),
+            timestamp=datetime.now()
+        )
+
+        embed.add_field(
+            name="Task Status",
+            value=task_status,
+            inline=False
+        )
+
+        if next_iteration:
+            embed.add_field(
+                name="Next Scheduled Run",
+                value=f"{next_iteration.strftime('%Y-%m-%d %H:%M:%S %Z')}",
+                inline=False
+            )
+
+        embed.add_field(
+            name="Current Time (EST)",
+            value=f"{current_time.strftime('%Y-%m-%d %H:%M:%S %Z')}",
+            inline=False
+        )
+
+        embed.add_field(
+            name="Scheduled Time",
+            value="Every day at 4:00 PM EST (filtered to Tue/Thu)",
+            inline=False
+        )
+
+        embed.set_footer(text="If the task is not running, try restarting the bot")
+
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
     @app_commands.command(name="startcheckin", description="Start a new session and post check-in")
     @app_commands.default_permissions(administrator=True)
