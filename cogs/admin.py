@@ -3,6 +3,7 @@ from discord import app_commands
 from discord.ext import commands
 import logging
 from datetime import datetime, date
+from typing import Optional
 from sqlalchemy.exc import IntegrityError
 from database.connection import SessionLocal
 from database.models import Season, Player, PlayerSeasonStats, Config, RankTier, Session, SessionCheckIn, Score, BonusConfig, PromotionHistory
@@ -857,49 +858,163 @@ class AdminCog(commands.Cog):
         finally:
             db.close()
 
-    @app_commands.command(name="cancelsession", description="Cancel the current unrevealed session")
-    @app_commands.default_permissions(administrator=True)
-    async def cancel_session(self, interaction: discord.Interaction):
-        """Cancel and delete the current unrevealed session."""
+    @app_commands.command(name="cancelsession", description="Cancel a session due to weather/emergency (Cynical only)")
+    @app_commands.describe(
+        session_id="Optional: Session ID to cancel (defaults to current unrevealed session)"
+    )
+    async def cancel_session(self, interaction: discord.Interaction, session_id: Optional[int] = None):
+        """
+        Cancel a session without applying MMR changes or decay.
+
+        This command can only be used by Cynical (user ID: 291621912914821120).
+        Use this when a session needs to be canceled due to weather, emergency, or other
+        circumstances where players should not be penalized with decay.
+
+        The session will be marked as revealed and completed without processing any MMR
+        or applying decay to checked-in players. Players who checked in will receive
+        attendance forgiveness (unexcused_misses reduced by 2).
+        """
         await interaction.response.defer(ephemeral=True)
+
+        # Check if user is authorized (Cynical only)
+        AUTHORIZED_USER_ID = 291621912914821120
+        if interaction.user.id != AUTHORIZED_USER_ID:
+            await interaction.followup.send(
+                "This command can only be used by Cynical.",
+                ephemeral=True
+            )
+            logger.warning(
+                f"Unauthorized user {interaction.user.name} ({interaction.user.id}) "
+                f"attempted to use /cancelsession"
+            )
+            return
 
         db = SessionLocal()
         try:
-            # Get current unrevealed session
-            session = db.query(Session).filter(
-                Session.is_revealed == False
-            ).order_by(Session.created_at.desc()).first()
+            # Get the session to cancel
+            if session_id:
+                session = db.query(Session).get(session_id)
+                if not session:
+                    await interaction.followup.send(
+                        f"Session {session_id} not found.",
+                        ephemeral=True
+                    )
+                    return
+            else:
+                # Get current unrevealed session
+                session = db.query(Session).filter(
+                    Session.is_revealed == False
+                ).order_by(Session.created_at.desc()).first()
 
-            if not session:
+                if not session:
+                    await interaction.followup.send(
+                        "No active session found to cancel.",
+                        ephemeral=True
+                    )
+                    return
+
+            # Check if already revealed
+            if session.is_revealed:
                 await interaction.followup.send(
-                    "No active session to cancel.",
+                    f"Session {session.id} has already been revealed and cannot be canceled.\n"
+                    f"Revealed at: {session.revealed_at}",
                     ephemeral=True
                 )
                 return
 
-            session_id = session.id
-            session_date = session.session_date
+            # Get session statistics for confirmation message
+            check_ins = db.query(SessionCheckIn).filter(
+                SessionCheckIn.session_id == session.id
+            ).all()
 
-            # Delete the session (cascade will delete related records)
-            db.delete(session)
+            scores_count = db.query(Score).filter(
+                Score.session_id == session.id
+            ).count()
+
+            # Mark session as revealed and completed without processing MMR
+            session.is_revealed = True
+            session.is_completed = True
+            session.revealed_at = datetime.now()
+
+            # Apply attendance forgiveness to all checked-in players
+            # This treats the cancellation as if they attended, reducing their unexcused misses
+            players_updated = 0
+            for check_in in check_ins:
+                player = db.query(Player).get(check_in.player_id)
+                if player and player.unexcused_misses > 0:
+                    # Apply slow forgiveness: reduce by 2, minimum 0
+                    old_misses = player.unexcused_misses
+                    player.unexcused_misses = max(0, player.unexcused_misses - 2)
+                    players_updated += 1
+                    logger.info(
+                        f"Canceled session: {player.username} misses reduced "
+                        f"{old_misses} -> {player.unexcused_misses}"
+                    )
+
             db.commit()
 
-            logger.info(f"Session {session_id} cancelled by {interaction.user.name}")
+            logger.warning(
+                f"Session {session.id} canceled by {interaction.user.name}. "
+                f"No MMR changes or decay applied. {len(check_ins)} players checked in, "
+                f"{scores_count} scores submitted."
+            )
 
+            # Create confirmation embed
+            embed = discord.Embed(
+                title="❄️ Session Canceled",
+                description=f"Session {session.id} has been canceled due to weather/emergency.",
+                color=discord.Color.orange(),
+                timestamp=datetime.now()
+            )
+
+            embed.add_field(
+                name="Session Date",
+                value=session.session_date.strftime("%Y-%m-%d"),
+                inline=True
+            )
+
+            embed.add_field(
+                name="Players Checked In",
+                value=str(len(check_ins)),
+                inline=True
+            )
+
+            embed.add_field(
+                name="Scores Submitted",
+                value=f"{scores_count} games",
+                inline=True
+            )
+
+            embed.add_field(
+                name="Result",
+                value=(
+                    "✅ No MMR changes applied\n"
+                    "✅ No decay applied\n"
+                    f"✅ Attendance forgiveness applied to {players_updated} player(s)"
+                ),
+                inline=False
+            )
+
+            embed.set_footer(text=f"Canceled by {interaction.user.display_name}")
+
+            # Send confirmation to the channel (public)
+            if interaction.channel:
+                await interaction.channel.send(embed=embed)
+
+            # Send ephemeral confirmation to Cynical
             await interaction.followup.send(
-                f"**Session Cancelled!**\n\n"
-                f"Session ID: {session_id}\n"
-                f"Date: {session_date}\n\n"
-                f"All check-ins and scores for this session have been removed.\n"
-                f"You can now start a new session with `/startcheckin`.",
+                f"✅ Session {session.id} successfully canceled.\n"
+                f"Check-ins: {len(check_ins)}\n"
+                f"Scores submitted: {scores_count} games\n"
+                f"Players with forgiveness applied: {players_updated}",
                 ephemeral=True
             )
 
         except Exception as e:
+            logger.error(f"Error canceling session: {e}", exc_info=True)
             db.rollback()
-            logger.error(f"Error cancelling session: {e}")
             await interaction.followup.send(
-                f"Error cancelling session: {str(e)}",
+                f"Error canceling session: {str(e)}",
                 ephemeral=True
             )
         finally:
