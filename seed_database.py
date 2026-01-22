@@ -133,7 +133,7 @@ def seed_config(db):
         },
         {
             "key": "decay_amount",
-            "value": "50",
+            "value": "200",
             "value_type": "int",
             "description": "MMR decay per miss after threshold"
         },

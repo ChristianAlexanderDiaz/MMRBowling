@@ -142,7 +142,8 @@ def create_status_embed(
 
 def create_detailed_results_embed(
     results_data: List[Dict[str, Any]],
-    session_info: Dict[str, Any]
+    session_info: Dict[str, Any],
+    decay_info: Optional[List[Dict[str, Any]]] = None
 ) -> discord.Embed:
     """
     Create detailed results embed with comprehensive MMR breakdown.
@@ -161,6 +162,12 @@ def create_detailed_results_embed(
             - rank_change: e.g., "Gold II ⬆️" or None
             - bonus_details: List of bonus descriptions
         session_info: Session metadata (session_id, session_date, k_factor)
+        decay_info: Optional list of decay information with keys:
+            - player_name: Display name
+            - mmr_before_decay: MMR before decay
+            - mmr_after_decay: MMR after decay
+            - decay_amount: Amount of decay (negative)
+            - unexcused_misses: Current miss count
 
     Returns:
         Discord embed with formatted results table
@@ -213,6 +220,27 @@ def create_detailed_results_embed(
         embed.add_field(
             name="Legend",
             value=legend,
+            inline=False
+        )
+
+    # Add decay section if any players received decay
+    if decay_info:
+        decay_lines = []
+        for decay_data in decay_info:
+            player_name = decay_data['player_name']
+            mmr_before = int(decay_data['mmr_before_decay'])
+            mmr_after = int(decay_data['mmr_after_decay'])
+            decay_amount = decay_data['decay_amount']
+            misses = decay_data['unexcused_misses']
+
+            # Format: PlayerName : 8400 --> 8200 (-200, 5 misses)
+            decay_lines.append(
+                f"{player_name:16}: {mmr_before:4} --> {mmr_after:4} ({decay_amount}, {misses} misses)"
+            )
+
+        embed.add_field(
+            name="⚠️ MMR Decay Applied",
+            value="```\n" + "\n".join(decay_lines) + "\n```",
             inline=False
         )
 
