@@ -546,7 +546,7 @@ class SessionCog(commands.Cog):
                         Score.game_number == 1
                     ).count()
 
-                    activation_threshold = self._get_config_value(db, 'session_activation_threshold', 3, int)
+                    activation_threshold = self._get_config_value(db, 'session_activation_threshold', 3)
 
                     if game1_count >= activation_threshold:
                         session.is_active = True
@@ -948,9 +948,9 @@ class SessionCog(commands.Cog):
                 return
 
             # Get configuration
-            k_factor = self._get_config_value(db, 'k_factor', 50, int)
-            decay_amount = self._get_config_value(db, 'decay_amount', 200, int)
-            decay_threshold = self._get_config_value(db, 'decay_threshold', 4, int)
+            k_factor = self._get_config_value(db, 'k_factor', 50)
+            decay_amount = self._get_config_value(db, 'decay_amount', 200)
+            decay_threshold = self._get_config_value(db, 'decay_threshold', 4)
 
             # Get bonus configuration
             bonus_config = self._get_bonus_config(db)
@@ -964,7 +964,7 @@ class SessionCog(commands.Cog):
             )
 
             # Calculate MMR changes
-            results = process_session_results(
+            results, divisions_merged = process_session_results(
                 players_data,
                 k_factor,
                 bonus_config,
@@ -1167,7 +1167,8 @@ class SessionCog(commands.Cog):
                     'session_date': session.session_date,
                     'k_factor': k_factor
                 },
-                decay_info=decay_info if decay_info else None
+                decay_info=decay_info if decay_info else None,
+                divisions_merged=divisions_merged
             )
 
             # Post results embed to the channel
@@ -1616,7 +1617,7 @@ class SessionCog(commands.Cog):
 
         return players_data
 
-    def _get_config_value(self, db: DBSession, key: str, default: Any, value_type: type = None) -> Any:
+    def _get_config_value(self, db: DBSession, key: str, default: Any) -> Any:
         """Get a configuration value from the database with caching."""
         from datetime import datetime, timedelta
 

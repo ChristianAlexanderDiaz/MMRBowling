@@ -153,7 +153,8 @@ def calculate_elo_update(
     opponent_score: int,
     player_mmr: int,
     opponent_mmr: int,
-    k_factor: int = 50
+    k_factor: int = 50,
+    k_factor_modifier: float = 1.0
 ) -> float:
     """
     Calculate MMR change for a single pairwise matchup using Elo system.
@@ -168,6 +169,7 @@ def calculate_elo_update(
         player_mmr: Player's current MMR
         opponent_mmr: Opponent's current MMR
         k_factor: K-factor for Elo calculation (controls magnitude of changes)
+        k_factor_modifier: Multiplier for K-factor (used for cross-division scaling)
 
     Returns:
         MMR change for this matchup (can be negative)
@@ -184,17 +186,31 @@ def calculate_elo_update(
         >>> # Underdog wins (big upset)
         >>> calculate_elo_update(225, 200, 7600, 8400, k_factor=50)
         45.45...  # Higher gain for beating stronger opponent
+
+        >>> # Cross-division loss with reduced K-factor
+        >>> calculate_elo_update(200, 225, 8000, 8000, k_factor=50, k_factor_modifier=0.5)
+        -12.5  # Loss scaled to 50% of normal
     """
     expected = calculate_expected_score(player_mmr, opponent_mmr)
     actual = calculate_actual_score(player_score, opponent_score)
 
-    mmr_change = k_factor * (actual - expected)
+    # Apply K-factor modifier for cross-division scaling
+    effective_k = k_factor * k_factor_modifier
+    mmr_change = effective_k * (actual - expected)
 
-    logger.debug(
-        f"Elo update: {mmr_change:+.2f} "
-        f"(Score: {player_score} vs {opponent_score}, "
-        f"Expected: {expected:.4f}, Actual: {actual:.1f}, K={k_factor})"
-    )
+    if k_factor_modifier != 1.0:
+        logger.debug(
+            f"Elo update: {mmr_change:+.2f} "
+            f"(Score: {player_score} vs {opponent_score}, "
+            f"Expected: {expected:.4f}, Actual: {actual:.1f}, "
+            f"K={k_factor}, Modifier={k_factor_modifier:.2f}, Effective K={effective_k:.1f})"
+        )
+    else:
+        logger.debug(
+            f"Elo update: {mmr_change:+.2f} "
+            f"(Score: {player_score} vs {opponent_score}, "
+            f"Expected: {expected:.4f}, Actual: {actual:.1f}, K={k_factor})"
+        )
 
     return mmr_change
 
@@ -203,50 +219,73 @@ def calculate_pairwise_elo(
     player_id: int,
     player_score: int,
     player_mmr: int,
-    opponents: List[Tuple[int, int, int]],
+    player_division: int,
+    opponents: List[Tuple[int, int, int, int]],
     k_factor: int = 50
 ) -> float:
     """
-    Calculate total Elo change for a player against all opponents in division.
+    Calculate total Elo change for a player against all opponents.
 
     This implements the pairwise comparison system where each player is compared
-    to every other player in their division.
+    to every other player in the session (same division or merged pool).
+
+    Cross-division K-factor scaling:
+    - Division 2 player loses to Division 1: K × 0.5 (50% reduction)
+    - Division 1 player loses to Division 2: K × 1.25 (25% increase)
+    - All other cases (wins, same division): K × 1.0 (normal)
 
     Args:
         player_id: ID of the player
         player_score: Player's series total
         player_mmr: Player's current MMR
-        opponents: List of (opponent_id, opponent_score, opponent_mmr) tuples
-        k_factor: K-factor for calculations
+        player_division: Player's original division (1 or 2)
+        opponents: List of (opponent_id, opponent_score, opponent_mmr, opponent_division) tuples
+        k_factor: Base K-factor for calculations
 
     Returns:
         Total MMR change from all pairwise comparisons
 
     Example:
-        >>> # Player with 625 series vs two opponents
-        >>> opponents = [(2, 600, 8000), (3, 650, 8100)]
-        >>> change = calculate_pairwise_elo(1, 625, 8000, opponents, k_factor=50)
-        >>> # Beats opponent 1 (expected ~50%, actual 1.0): ~+25
-        >>> # Loses to opponent 2 (expected ~41%, actual 0.0): ~-20.5
-        >>> # Total: ~+4.5
+        >>> # Division 1 player with 625 series vs mixed opponents
+        >>> opponents = [(2, 600, 8000, 1), (3, 650, 8100, 2)]
+        >>> change = calculate_pairwise_elo(1, 625, 8000, 1, opponents, k_factor=50)
+        >>> # Beats D1 opponent (normal K): ~+25
+        >>> # Loses to D2 opponent (K×1.25 penalty): ~-25.6
+        >>> # Total: ~-0.6
     """
     total_change = 0.0
 
-    logger.info(f"Calculating pairwise Elo for player {player_id} (score: {player_score}, MMR: {player_mmr})")
+    logger.info(f"Calculating pairwise Elo for player {player_id} (Division {player_division}, score: {player_score}, MMR: {player_mmr})")
 
-    for opponent_id, opponent_score, opponent_mmr in opponents:
+    for opponent_id, opponent_score, opponent_mmr, opponent_division in opponents:
         if opponent_id == player_id:
             continue  # Skip self-comparison
+
+        # Determine K-factor modifier based on cross-division rules
+        k_modifier = 1.0
+        actual_score = calculate_actual_score(player_score, opponent_score)
+
+        # Only apply scaling for cross-division losses
+        if player_division != opponent_division:
+            if actual_score == 0.0:  # Player lost
+                if player_division == 2 and opponent_division == 1:
+                    # Division 2 loses to Division 1: 50% reduction
+                    k_modifier = 0.5
+                    logger.debug(f"  Cross-division loss scaling: Division 2 → Division 1 (K × 0.5)")
+                elif player_division == 1 and opponent_division == 2:
+                    # Division 1 loses to Division 2: 25% increase
+                    k_modifier = 1.25
+                    logger.debug(f"  Cross-division loss scaling: Division 1 → Division 2 (K × 1.25)")
 
         matchup_change = calculate_elo_update(
             player_score, opponent_score,
             player_mmr, opponent_mmr,
-            k_factor
+            k_factor, k_modifier
         )
         total_change += matchup_change
 
         logger.debug(
-            f"  vs Player {opponent_id}: {matchup_change:+.2f} "
+            f"  vs Player {opponent_id} (Div {opponent_division}): {matchup_change:+.2f} "
             f"(opponent score: {opponent_score}, opponent MMR: {opponent_mmr})"
         )
 
@@ -532,77 +571,123 @@ def process_session_results(
     k_factor: int,
     bonus_config: BonusConfig,
     rank_tiers: List[Dict[str, Any]]
-) -> List[MMRResult]:
+) -> Tuple[List[MMRResult], bool]:
     """
     Process all players in a session and calculate MMR updates.
 
     This is the main entry point for MMR calculation. It:
     1. Groups players by division
-    2. Calculates pairwise Elo changes within each division
-    3. Applies performance bonuses
-    4. Updates rank tiers
-    5. Returns detailed results for each player
+    2. Checks if each division has at least 2 players (minimum for normal play)
+    3. If any division has only 1 player, merges all players into a single pool
+    4. Calculates pairwise Elo changes (with cross-division scaling if merged)
+    5. Applies performance bonuses
+    6. Updates rank tiers
+    7. Returns detailed results for each player and division merge status
+
+    Division Merging Rules:
+    - Per-division minimum: 2 players required for normal divisional play
+    - If any division has only 1 player, all players compete in a merged pool
+    - In merged pools, original division is tracked for K-factor scaling
+
+    Cross-Division K-factor Scaling (only when divisions are merged):
+    - Division 2 loses to Division 1: K × 0.5 (50% reduction in loss)
+    - Division 1 loses to Division 2: K × 1.25 (25% increase in loss)
+    - All other cases: K × 1.0 (normal)
 
     Args:
         players_data: List of player dictionaries, each containing:
             - player_id: Unique player identifier
             - game1, game2: Individual game scores
             - current_mmr: Current MMR rating
-            - division: Division identifier (e.g., 'A', 'B')
+            - division: Division identifier (1 or 2)
         k_factor: K-factor for Elo calculations
         bonus_config: Bonus configuration
         rank_tiers: List of rank tier configurations
 
     Returns:
-        List of MMRResult objects with detailed calculation results
+        Tuple of (List of MMRResult objects, divisions_were_merged boolean)
 
     Example:
         >>> players = [
         ...     {'player_id': 1, 'game1': 210, 'game2': 220,
-        ...      'current_mmr': 8000, 'division': 'A'},
+        ...      'current_mmr': 8000, 'division': 1},
         ...     {'player_id': 2, 'game1': 200, 'game2': 205,
-        ...      'current_mmr': 7900, 'division': 'A'},
+        ...      'current_mmr': 7900, 'division': 1},
         ... ]
         >>> bonus_cfg = BonusConfig(game_200=5, game_250=10)
         >>> tiers = [{'name': 'Gold', 'min_mmr': 7800, 'color': '#FFD700'}]
-        >>> results = process_session_results(players, k_factor=50,
+        >>> results, merged = process_session_results(players, k_factor=50,
         ...                                   bonus_config=bonus_cfg,
         ...                                   rank_tiers=tiers)
     """
     logger.info(f"Processing session results for {len(players_data)} players (K={k_factor})")
 
     # Group players by division
-    divisions: Dict[str, List[Dict[str, Any]]] = {}
+    divisions: Dict[int, List[Dict[str, Any]]] = {}
     for player in players_data:
-        division = str(player.get('division', 1))
+        division = int(player.get('division', 1))
         if division not in divisions:
             divisions[division] = []
         divisions[division].append(player)
 
+    # Log division distribution
+    for div_num, div_players in divisions.items():
+        logger.info(f"Division {div_num}: {len(div_players)} players")
+
+    # Check if any division has only 1 player (requires merging)
+    min_players_per_division = 2
+    needs_merging = any(len(players) < min_players_per_division for players in divisions.values())
+
+    if needs_merging:
+        logger.warning(
+            f"Division merging triggered: At least one division has fewer than {min_players_per_division} players. "
+            f"Merging all players into a single pool for this session."
+        )
+        # Log which divisions are under-populated
+        for div_num, div_players in divisions.items():
+            if len(div_players) < min_players_per_division:
+                logger.warning(f"  Division {div_num} has only {len(div_players)} player(s) - below minimum")
+
+        # Merge all players into a single pool
+        merged_pool = []
+        for div_players in divisions.values():
+            merged_pool.extend(div_players)
+
+        # Process merged pool as a single group
+        division_groups = {'merged': merged_pool}
+        logger.info(f"Processing merged pool with {len(merged_pool)} total players")
+    else:
+        # Normal divisional play - each division plays separately
+        logger.info("Normal divisional play: All divisions have sufficient players")
+        division_groups = {f"Division {div_num}": div_players for div_num, div_players in divisions.items()}
+
     results: List[MMRResult] = []
 
-    # Process each division separately
-    for division_name, division_players in divisions.items():
-        logger.info(f"Processing Division {division_name} with {len(division_players)} players")
+    # Process each group (either merged pool or separate divisions)
+    for group_name, group_players in division_groups.items():
+        logger.info(f"Processing {group_name} with {len(group_players)} players")
 
         # Calculate pairwise Elo for each player
-        for player in division_players:
+        for player in group_players:
             player_id = player['player_id']
+            player_division = int(player.get('division', 1))
             player_score = PlayerScore(
                 player_id=player_id,
                 game1=player['game1'],
                 game2=player['game2'],
                 series_total=0,  # Will be calculated in __post_init__
-                division=division_name
+                division=str(player_division)
             )
             current_mmr = player['current_mmr']
 
-            # Build opponent list (all other players in division)
+            # Build opponent list (all other players in this group)
+            # Include opponent's division for cross-division K-factor scaling
             opponents = [
                 (p['player_id'],
                  p['game1'] + p['game2'],
-                 p['current_mmr'])
-                for p in division_players
+                 p['current_mmr'],
+                 int(p.get('division', 1)))
+                for p in group_players
                 if p['player_id'] != player_id
             ]
 
@@ -611,6 +696,7 @@ def process_session_results(
                 player_id,
                 player_score.series_total,
                 current_mmr,
+                player_division,
                 opponents,
                 k_factor
             )
@@ -642,10 +728,10 @@ def process_session_results(
             results.append(result)
 
             logger.info(
-                f"Player {player_id}: {current_mmr} → {new_mmr} "
+                f"Player {player_id} (Division {player_division}): {current_mmr} → {new_mmr} "
                 f"(Elo: {elo_change:+.1f}, Bonus: +{bonus_mmr}, Total: {total_change:+d}) "
                 f"[{old_rank.name} → {new_rank.name}]"
             )
 
     logger.info(f"Session processing complete. {len(results)} players updated.")
-    return results
+    return results, needs_merging
