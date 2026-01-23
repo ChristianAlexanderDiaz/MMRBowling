@@ -94,11 +94,53 @@ def create_status_embed(
                 - 'status': str (status description)
             - 'ready_count': int (players with both games submitted)
             - 'total_count': int (total checked-in players)
+            - 'game1_count': int (players who submitted Game 1)
+            - 'activation_threshold': int (number of Game 1 scores needed to activate)
         is_active: Whether session is active (3+ Game 1 submissions)
 
     Returns:
         Discord embed ready to post
     """
+    game1_count = session_data.get('game1_count', 0)
+    activation_threshold = session_data.get('activation_threshold', 3)
+
+    # If not active and we haven't reached the threshold, show waiting message
+    if not is_active and game1_count < activation_threshold:
+        color = discord.Color.orange()
+        embed = discord.Embed(
+            title="📊 Session Status",
+            color=color,
+            timestamp=datetime.now()
+        )
+
+        embed.add_field(
+            name="⏳ Waiting for Check-In to Close",
+            value=(
+                f"Waiting for **{activation_threshold - game1_count} more Game 1 score(s)** to close check-in.\n"
+                f"Currently: **{game1_count}/{activation_threshold}** Game 1 scores submitted.\n\n"
+                f"Once {activation_threshold} players have submitted their Game 1 scores, "
+                f"check-in will close and the session will become active."
+            ),
+            inline=False
+        )
+
+        # Show who has submitted so far (simplified)
+        all_players = session_data.get('players', [])
+        submitted_g1 = [p for p in all_players if p.get('game1') is not None]
+
+        if submitted_g1:
+            submitted_names = [p['name'] for p in submitted_g1]
+            embed.add_field(
+                name="Players Who Submitted Game 1",
+                value=", ".join(submitted_names),
+                inline=False
+            )
+
+        embed.set_footer(text=f"Scores submitted: {game1_count} • Session will activate at {activation_threshold}")
+
+        return embed
+
+    # If active or we've reached the threshold, show the full table
     color = discord.Color.green() if is_active else discord.Color.orange()
 
     embed = discord.Embed(
@@ -214,6 +256,37 @@ def create_detailed_results_embed(
             inline=False
         )
 
+    # Add promotions and relegations section
+    promotions = []
+    relegations = []
+    for result in results_data:
+        if result.get('rank_change'):
+            rank_change_text = result['rank_change']
+            # rank_change format: "old_rank → new_rank ⬆️" or "old_rank → new_rank ⬇️"
+            if '⬆️' in rank_change_text:
+                # This is a promotion - remove the arrow emoji for cleaner display
+                clean_text = rank_change_text.replace(' ⬆️', '')
+                promotions.append(f"{result['player_name']}: {clean_text}")
+            elif '⬇️' in rank_change_text:
+                # This is a relegation - remove the arrow emoji for cleaner display
+                clean_text = rank_change_text.replace(' ⬇️', '')
+                relegations.append(f"{result['player_name']}: {clean_text}")
+
+    if promotions or relegations:
+        rank_lines = []
+        if promotions:
+            rank_lines.extend([f"📈 {p}" for p in promotions])
+        if relegations:
+            if promotions:
+                rank_lines.append("")  # Add spacing
+            rank_lines.extend([f"📉 {r}" for r in relegations])
+
+        embed.add_field(
+            name="🏅 Rank Changes",
+            value="\n".join(rank_lines),
+            inline=False
+        )
+
     # Add bonuses section if any
     bonus_lines = []
     for result in results_data:
@@ -225,7 +298,7 @@ def create_detailed_results_embed(
     if bonus_lines:
         embed.add_field(
             name="🎯 Bonuses Earned",
-            value=f"```\n" + "\n".join(bonus_lines) + "\n```",
+            value="```\n" + "\n".join(bonus_lines) + "\n```",
             inline=False
         )
 
@@ -358,19 +431,17 @@ def create_submission_confirmation(
     game_number: int,
     score: int,
     both_submitted: bool,
-    session_activated: bool,
-    player_name: str
+    session_activated: bool
 ) -> discord.Embed:
     """
     Build submission confirmation embed (ephemeral response).
-    
+
     Args:
         game_number: Which game was submitted (1, 2, or 3)
         score: The score submitted
         both_submitted: Whether player has submitted all games
         session_activated: Whether this submission activated the session
-        player_name: Name of the player
-    
+
     Returns:
         Discord embed for ephemeral response
     """
@@ -403,20 +474,19 @@ def create_submission_confirmation(
     return embed
 
 
-def create_reminder_embed(player_names: List[str], missing_games: str) -> discord.Embed:
+def create_reminder_embed(missing_games: str) -> discord.Embed:
     """
     Build reminder embed for players who haven't submitted.
-    
+
     Args:
-        player_names: List of player names who need to submit
         missing_games: Description of what's missing (e.g., "Game 2")
-    
+
     Returns:
         Discord embed for reminder message
     """
     embed = discord.Embed(
         title="👋 Friendly Reminder",
-        description=f"We're still waiting for your scores!",
+        description="We're still waiting for your scores!",
         color=discord.Color.blue(),
         timestamp=datetime.now()
     )
@@ -582,30 +652,33 @@ def _build_detailed_results_table(results: List[Dict[str, Any]]) -> str:
     Build clean MMR change table for results embed.
 
     Format:
-    MicheL         : 450 | 7275 --> 7448 (+400 elo +27 bonus = +427)
-    B. NetanyaSwoop: 480 | 8927 --> 9100 (+173)
+    Player         | Series | Old MMR | +/-  | New MMR
+    ---------------|--------|---------|------|--------
+    MicheL         |    450 |    7275 | +173 |    7448
+    B. NetanyaSwoop|    480 |    8927 | +173 |    9100
     """
     if not results:
         return "No results"
 
     lines = []
 
+    # Header
+    lines.append("Player         | Series | Old MMR | +/-  | New MMR")
+    lines.append("---------------|--------|---------|------|--------")
+
     for result in results:
-        name = result['player_name'][:16]
+        name = result['player_name'][:15].ljust(15)
         series = result['series']
         old_mmr = int(result['old_mmr'])
         new_mmr = int(result['new_mmr'])
-        mmr_change = result['mmr_change']
-        elo_change = int(result.get('elo_change', mmr_change))
-        bonus_mmr = int(result.get('bonus_mmr', 0))
+        mmr_change = int(result['mmr_change'])
 
-        # Format breakdown if bonus exists
-        if bonus_mmr != 0:
-            change_text = f"({elo_change:+d} elo {bonus_mmr:+d} bonus = {mmr_change:+d})"
-        else:
-            change_text = f"({mmr_change:+d})"
+        series_str = str(series).rjust(6)
+        old_mmr_str = str(old_mmr).rjust(7)
+        change_str = f"{mmr_change:+d}".rjust(4)
+        new_mmr_str = str(new_mmr).rjust(7)
 
-        line = f"{name:16}: {series:3} | {old_mmr:5.0f} --> {new_mmr:5.0f} {change_text}"
+        line = f"{name} | {series_str} | {old_mmr_str} | {change_str} | {new_mmr_str}"
         lines.append(line)
 
     return "\n".join(lines)

@@ -39,13 +39,17 @@ class SessionCog(commands.Cog):
 
         try:
             self.check_in_task.start()
-            logger.info("Check-in task started successfully")
+            self.ping_8pm_task.start()
+            self.ping_9pm_task.start()
+            logger.info("Check-in and ping tasks started successfully")
         except Exception as e:
             logger.error(f"Failed to start check-in task: {type(e).__name__}: {e}", exc_info=True)
 
     def cog_unload(self):
         """Clean up when cog is unloaded."""
         self.check_in_task.cancel()
+        self.ping_8pm_task.cancel()
+        self.ping_9pm_task.cancel()
 
     @tasks.loop(time=time(hour=16, minute=0, tzinfo=ZoneInfo("America/New_York")))  # 4:00 PM EST
     async def check_in_task(self):
@@ -134,7 +138,15 @@ class SessionCog(commands.Cog):
                 return
 
             try:
-                message = await target_channel.send(embed=embed)
+                # Ping the role with check-in
+                role_id = 1450967300197974240
+                role = guild.get_role(role_id)
+                role_mention = role.mention if role else f"<@&{role_id}>"
+
+                message = await target_channel.send(
+                    content=f"{role_mention} Bowling check-in is now open!",
+                    embed=embed
+                )
                 await message.add_reaction("✅")
                 await message.add_reaction("❌")
                 await message.pin()
@@ -166,6 +178,170 @@ class SessionCog(commands.Cog):
         est_tz = ZoneInfo("America/New_York")
         current_time = datetime.now(est_tz)
         logger.info(f"Check-in task loop ready. Current time: {current_time.strftime('%Y-%m-%d %H:%M:%S %Z')}. Next run at 4:00 PM EST on Tuesday/Thursday.")
+
+    @tasks.loop(time=time(hour=20, minute=0, tzinfo=ZoneInfo("America/New_York")))  # 8:00 PM EST
+    async def ping_8pm_task(self):
+        """
+        Automated task to ping the bowling role at 8:00 PM EST on Tuesday and Thursday.
+        Reminds people to check in if they haven't already.
+        """
+        try:
+            # Only run on Tuesday (1) and Thursday (3) using EST timezone
+            est_tz = ZoneInfo("America/New_York")
+            current_time = datetime.now(est_tz)
+
+            logger.info(f"8PM ping task fired at {current_time.strftime('%Y-%m-%d %H:%M:%S %Z')} - Day: {current_time.strftime('%A')} ({current_time.weekday()})")
+
+            if current_time.weekday() not in [1, 3]:
+                logger.info(f"Skipping 8PM ping - today is {current_time.strftime('%A')}, not Tuesday or Thursday")
+                return
+
+            logger.info("8PM ping time! Sending reminder...")
+        except Exception as e:
+            logger.error(f"Error in 8PM ping task pre-check: {e}", exc_info=True)
+            return
+
+        db = SessionLocal()
+        try:
+            # Get active session
+            session = db.query(Session).filter(
+                Session.is_revealed == False
+            ).order_by(Session.created_at.desc()).first()
+
+            if not session or not session.check_in_channel_id:
+                logger.info("No active session found for 8PM ping")
+                return
+
+            # Get the channel
+            channel = self.bot.get_channel(int(session.check_in_channel_id))
+            if not channel:
+                logger.error(f"Cannot find channel {session.check_in_channel_id} for 8PM ping")
+                return
+
+            guild = channel.guild
+            role_id = 1450967300197974240
+            role = guild.get_role(role_id)
+            role_mention = role.mention if role else f"<@&{role_id}>"
+
+            # Send reminder ping
+            await channel.send(
+                f"{role_mention} Reminder: Bowling tonight! Make sure you've checked in with ✅ or ❌"
+            )
+
+            logger.info(f"Sent 8PM reminder ping to {channel.name}")
+
+        except Exception as e:
+            logger.error(f"Error in 8PM ping task: {e}", exc_info=True)
+        finally:
+            db.close()
+
+    @ping_8pm_task.before_loop
+    async def before_ping_8pm_task(self):
+        """Wait for the bot to be ready before starting the 8PM ping task."""
+        await self.bot.wait_until_ready()
+        est_tz = ZoneInfo("America/New_York")
+        current_time = datetime.now(est_tz)
+        logger.info(f"8PM ping task loop ready. Current time: {current_time.strftime('%Y-%m-%d %H:%M:%S %Z')}. Next run at 8:00 PM EST on Tuesday/Thursday.")
+
+    @tasks.loop(time=time(hour=21, minute=0, tzinfo=ZoneInfo("America/New_York")))  # 9:00 PM EST
+    async def ping_9pm_task(self):
+        """
+        Automated task to ping individual players at 9:00 PM EST on Tuesday and Thursday.
+        Pings only registered players who haven't reacted with checkmark or X (haven't made their decision yet).
+        """
+        try:
+            # Only run on Tuesday (1) and Thursday (3) using EST timezone
+            est_tz = ZoneInfo("America/New_York")
+            current_time = datetime.now(est_tz)
+
+            logger.info(f"9PM ping task fired at {current_time.strftime('%Y-%m-%d %H:%M:%S %Z')} - Day: {current_time.strftime('%A')} ({current_time.weekday()})")
+
+            if current_time.weekday() not in [1, 3]:
+                logger.info(f"Skipping 9PM ping - today is {current_time.strftime('%A')}, not Tuesday or Thursday")
+                return
+
+            logger.info("9PM ping time! Checking for undecided players...")
+        except Exception as e:
+            logger.error(f"Error in 9PM ping task pre-check: {e}", exc_info=True)
+            return
+
+        db = SessionLocal()
+        try:
+            # Get active session
+            session = db.query(Session).filter(
+                Session.is_revealed == False
+            ).order_by(Session.created_at.desc()).first()
+
+            if not session or not session.check_in_message_id or not session.check_in_channel_id:
+                logger.info("No active session found for 9PM ping")
+                return
+
+            # Get the channel
+            channel = self.bot.get_channel(int(session.check_in_channel_id))
+            if not channel:
+                logger.error(f"Cannot find channel {session.check_in_channel_id} for 9PM ping")
+                return
+
+            # Get the check-in message
+            try:
+                message = await channel.fetch_message(int(session.check_in_message_id))
+            except discord.NotFound:
+                logger.error(f"Check-in message {session.check_in_message_id} not found")
+                return
+            except discord.Forbidden:
+                logger.error(f"Missing permissions to fetch message {session.check_in_message_id}")
+                return
+
+            # Get all registered players from the database
+            registered_players = db.query(Player).all()
+
+            # Get players who reacted with checkmark
+            checked_in_discord_ids = set()
+            for reaction in message.reactions:
+                if str(reaction.emoji) == "✅":
+                    async for user in reaction.users():
+                        if user.id != self.bot.user.id:
+                            checked_in_discord_ids.add(user.id)
+
+            # Get players who reacted with X
+            declined_discord_ids = set()
+            for reaction in message.reactions:
+                if str(reaction.emoji) == "❌":
+                    async for user in reaction.users():
+                        if user.id != self.bot.user.id:
+                            declined_discord_ids.add(user.id)
+
+            # Find registered players who haven't reacted at all
+            undecided_players = []
+            for player in registered_players:
+                discord_id = int(player.discord_id)
+                if discord_id not in checked_in_discord_ids and discord_id not in declined_discord_ids:
+                    member = channel.guild.get_member(discord_id)
+                    if member:
+                        undecided_players.append(member)
+
+            if undecided_players:
+                # Ping each undecided player
+                mentions = " ".join([member.mention for member in undecided_players])
+                await channel.send(
+                    f"{mentions} Last call! Please check in with ✅ if you're coming tonight or ❌ if you can't make it."
+                )
+                logger.info(f"Sent 9PM individual pings to {len(undecided_players)} undecided players")
+            else:
+                logger.info("No undecided players found for 9PM ping")
+
+        except Exception as e:
+            logger.error(f"Error in 9PM ping task: {e}", exc_info=True)
+        finally:
+            db.close()
+
+    @ping_9pm_task.before_loop
+    async def before_ping_9pm_task(self):
+        """Wait for the bot to be ready before starting the 9PM ping task."""
+        await self.bot.wait_until_ready()
+        est_tz = ZoneInfo("America/New_York")
+        current_time = datetime.now(est_tz)
+        logger.info(f"9PM ping task loop ready. Current time: {current_time.strftime('%Y-%m-%d %H:%M:%S %Z')}. Next run at 9:00 PM EST on Tuesday/Thursday.")
 
     @app_commands.command(name="nextcheckin", description="Check when the next automated check-in will occur")
     async def next_checkin(self, interaction: discord.Interaction):
@@ -889,6 +1065,167 @@ class SessionCog(commands.Cog):
         finally:
             db.close()
 
+    @app_commands.command(name="submitscore", description="Admin command to submit a score on behalf of a player")
+    @app_commands.describe(
+        player="Player to submit score for",
+        score="The score (0-300)"
+    )
+    @app_commands.default_permissions(administrator=True)
+    async def submit_score_for_player(
+        self,
+        interaction: discord.Interaction,
+        player: discord.Member,
+        score: int
+    ):
+        """
+        Admin command to submit a score on behalf of a player who forgot to submit.
+
+        Auto-assigns game number just like the regular submit command.
+        """
+        await interaction.response.defer(ephemeral=True)
+
+        # Validate score
+        if not (0 <= score <= 300):
+            await interaction.followup.send(
+                "Invalid score! Score must be between 0 and 300.",
+                ephemeral=True
+            )
+            return
+
+        db = SessionLocal()
+        try:
+            # Get current unrevealed session
+            session = db.query(Session).filter(
+                Session.is_revealed == False
+            ).order_by(Session.created_at.desc()).first()
+
+            if not session:
+                await interaction.followup.send(
+                    "No active session found!",
+                    ephemeral=True
+                )
+                return
+
+            # Get player from database
+            target_player = db.query(Player).filter(
+                Player.discord_id == str(player.id)
+            ).first()
+
+            if not target_player:
+                await interaction.followup.send(
+                    f"Player {player.mention} is not registered!",
+                    ephemeral=True
+                )
+                return
+
+            # Check if player is checked in
+            check_in = db.query(SessionCheckIn).filter(
+                SessionCheckIn.session_id == session.id,
+                SessionCheckIn.player_id == target_player.id
+            ).first()
+
+            if not check_in:
+                await interaction.followup.send(
+                    f"{player.mention} must be checked in before submitting scores!",
+                    ephemeral=True
+                )
+                return
+
+            # Check how many games already submitted
+            existing_scores = db.query(Score).filter(
+                Score.player_id == target_player.id,
+                Score.session_id == session.id
+            ).order_by(Score.game_number).all()
+
+            if len(existing_scores) >= 2:
+                await interaction.followup.send(
+                    f"{player.mention} has already submitted both games!",
+                    ephemeral=True
+                )
+                return
+
+            # Determine game number
+            game_number = len(existing_scores) + 1
+
+            # Create new score
+            new_score = Score(
+                player_id=target_player.id,
+                session_id=session.id,
+                game_number=game_number,
+                score=score,
+                mmr_before=target_player.current_mmr,
+                mmr_after=target_player.current_mmr,
+                mmr_change=0.0,
+                bonus_applied=0.0
+            )
+            db.add(new_score)
+            db.commit()
+
+            logger.info(
+                f"Admin {interaction.user.name} submitted Game {game_number}: {score} "
+                f"for player {target_player.username}"
+            )
+
+            # Update check-in status if both games submitted
+            if game_number == 2:
+                check_in.has_submitted = True
+                db.commit()
+                logger.debug(f"Player {target_player.username} has submitted both games")
+
+            # Check for session activation
+            activation_msg = ""
+            if not session.is_active and game_number == 1:
+                db.refresh(session)
+
+                if not session.is_active:
+                    game1_count = db.query(Score).filter(
+                        Score.session_id == session.id,
+                        Score.game_number == 1
+                    ).count()
+
+                    activation_threshold = self._get_config_value(db, 'session_activation_threshold', 3)
+
+                    if game1_count >= activation_threshold:
+                        session.is_active = True
+                        db.commit()
+                        logger.info(
+                            f"Session {session.id} activated by admin submission! "
+                            f"({game1_count} Game 1 submissions)"
+                        )
+                        activation_msg = f"\n\nSession is now ACTIVE!"
+
+            # Update status embed
+            await self._update_status_embed(session.id, db)
+
+            # Check for auto-reveal
+            auto_reveal_msg = ""
+            if session.is_active and game_number == 2:
+                if self._check_auto_reveal(session.id, db):
+                    if not session.auto_reveal_notified:
+                        logger.info(
+                            f"Session {session.id} ready for auto-reveal after admin submission"
+                        )
+                        auto_reveal_msg = "\n\nAll players have submitted! Ready for reveal."
+                        await self._notify_auto_reveal_ready(session.id, db)
+                        session.auto_reveal_notified = True
+                        db.commit()
+
+            await interaction.followup.send(
+                f"✅ Score recorded for **{player.display_name}**\n"
+                f"**Game {game_number}**: **{score}**"
+                f"{activation_msg}{auto_reveal_msg}",
+                ephemeral=True
+            )
+
+        except Exception as e:
+            logger.error(f"Error submitting score for player: {e}")
+            await interaction.followup.send(
+                f"Error submitting score: {str(e)}",
+                ephemeral=True
+            )
+        finally:
+            db.close()
+
     @app_commands.command(name="reveal", description="Reveal session results and calculate MMR")
     @app_commands.default_permissions(administrator=True)
     async def reveal_session(self, interaction: discord.Interaction):
@@ -915,7 +1252,7 @@ class SessionCog(commands.Cog):
             # Check if session is active
             if not session.is_active:
                 # Get activation threshold from config
-                activation_threshold = self._get_config_value(db, 'session_activation_threshold', 3, int)
+                activation_threshold = self._get_config_value(db, 'session_activation_threshold', 3)
                 game1_count = db.query(Score).filter(
                     Score.session_id == session.id,
                     Score.game_number == 1
@@ -1127,9 +1464,9 @@ class SessionCog(commands.Cog):
                 rank_change = None
                 if result.rank_changed:
                     if result.new_rank.min_mmr > result.old_rank.min_mmr:
-                        rank_change = f"{result.new_rank.name} ⬆️"
+                        rank_change = f"{result.old_rank.name} → {result.new_rank.name} ⬆️"
                     else:
-                        rank_change = f"{result.new_rank.name} ⬇️"
+                        rank_change = f"{result.old_rank.name} → {result.new_rank.name} ⬇️"
 
                 results_data.append({
                     'player_name': display_name,
@@ -1394,8 +1731,8 @@ class SessionCog(commands.Cog):
             )
 
             embed.add_field(
-                name="Session",
-                value=f"Session {session_id}",
+                name="Session Date",
+                value=session.session_date.strftime('%B %d, %Y'),
                 inline=False
             )
 
@@ -1465,7 +1802,7 @@ class SessionCog(commands.Cog):
                 players_complete += 1
 
         # Get activation threshold from config
-        activation_threshold = self._get_config_value(db, 'session_activation_threshold', 3, int)
+        activation_threshold = self._get_config_value(db, 'session_activation_threshold', 3)
 
         return {
             'is_active': session.is_active,
@@ -1831,6 +2168,7 @@ class SessionCog(commands.Cog):
 
         players_data = []
         ready_count = 0
+        game1_count = 0
 
         for check_in in check_ins:
             player = db.query(Player).get(check_in.player_id)
@@ -1845,6 +2183,9 @@ class SessionCog(commands.Cog):
             game1 = next((s.score for s in scores if s.game_number == 1), None)
             game2 = next((s.score for s in scores if s.game_number == 2), None)
             series = (game1 or 0) + (game2 or 0) if game1 or game2 else None
+
+            if game1:
+                game1_count += 1
 
             if game1 and game2:
                 status = '✅ Ready'
@@ -1867,10 +2208,15 @@ class SessionCog(commands.Cog):
                 'status': status
             })
 
+        # Get activation threshold from config
+        activation_threshold = self._get_config_value(db, 'session_activation_threshold', 3)
+
         return {
             'players': players_data,
             'ready_count': ready_count,
-            'total_count': len(players_data)
+            'total_count': len(players_data),
+            'game1_count': game1_count,
+            'activation_threshold': activation_threshold
         }
 
 
