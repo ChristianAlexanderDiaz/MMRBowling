@@ -143,7 +143,8 @@ def create_status_embed(
 def create_detailed_results_embed(
     results_data: List[Dict[str, Any]],
     session_info: Dict[str, Any],
-    decay_info: Optional[List[Dict[str, Any]]] = None
+    decay_info: Optional[List[Dict[str, Any]]] = None,
+    divisions_merged: bool = False
 ) -> discord.Embed:
     """
     Create detailed results embed with comprehensive MMR breakdown.
@@ -168,6 +169,7 @@ def create_detailed_results_embed(
             - mmr_after_decay: MMR after decay
             - decay_amount: Amount of decay (negative)
             - unexcused_misses: Current miss count
+        divisions_merged: Whether divisions were merged for this session
 
     Returns:
         Discord embed with formatted results table
@@ -177,6 +179,18 @@ def create_detailed_results_embed(
         color=discord.Color.gold(),
         timestamp=datetime.now()
     )
+
+    # Add division merge notice if applicable
+    if divisions_merged:
+        embed.add_field(
+            name="⚠️ Divisions Merged",
+            value=(
+                "All players competed in a single pool due to low turnout in one division.\n"
+                "Cross-division losses were scaled: Div2 losses to Div1 reduced 50%, "
+                "Div1 losses to Div2 increased 25%."
+            ),
+            inline=False
+        )
 
     # Group by division
     div1_results = [r for r in results_data if r.get('division') == 1]
